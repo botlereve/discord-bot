@@ -50,7 +50,7 @@ def load_reminders_from_db():
     """從 MongoDB 讀取所有提醒到內存。"""
     global reminders
     try:
-        if not reminders_collection:
+        if reminders_collection is None:
             print("⚠ MongoDB not available, using empty cache")
             reminders = {}
             return
@@ -77,7 +77,7 @@ def load_reminders_from_db():
 def save_reminder_to_db(user_id: int, reminder: dict):
     """儲存單條提醒到 MongoDB。"""
     try:
-        if not reminders_collection:
+        if reminders_collection is None:
             return
         
         r = reminder.copy()
@@ -93,7 +93,7 @@ def save_reminder_to_db(user_id: int, reminder: dict):
 def update_reminder_in_db(user_id: int, reminder_index: int, reminder: dict):
     """更新提醒狀態（例如 sent=True）。"""
     try:
-        if not reminders_collection:
+        if reminders_collection is None:
             return
         
         r = reminder.copy()
