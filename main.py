@@ -617,6 +617,21 @@ async def scan_old_messages_cmd(ctx, days: int = 7):
 
 @bot.command(name="commands")
 async def show_commands(ctx):
+
+@bot.command(name="debug")
+async def debug_info(ctx):
+    """!debug：顯示 internal 狀態。"""
+    user_id = ctx.author.id
+    await send_reply(f"Your user ID: {user_id}")
+    await send_reply(f"Total users in memory: {len(reminders)}")
+    await send_reply(f"Users: {list(reminders.keys())}")
+    
+    if user_id in reminders:
+        await send_reply(f"Your reminders count: {len(reminders[user_id])}")
+    else:
+        await send_reply(f"❌ Your user ID NOT found in memory!")
+
+    
     """!commands：顯示所有指令。"""
     text = """
 📚 **Reminder Bot Commands**
