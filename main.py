@@ -4,7 +4,8 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import pytz
 import re
-import json
+from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 
 # Replit keep-alive
 from keep_alive import keep_alive
@@ -15,6 +16,7 @@ REMINDER_CHANNEL_ID = int(os.getenv("REMINDER_CHANNEL_ID"))
 TARGET_USER_ID = int(os.getenv("TARGET_USER_ID"))
 SECOND_USER_ID = int(os.getenv("SECOND_USER_ID"))
 BOT_COMMAND_CHANNEL_ID = int(os.getenv("BOT_COMMAND_CHANNEL_ID"))
+MONGODB_URI = os.getenv("MONGODB_URI")
 # =====================================
 
 intents = discord.Intents.default()
@@ -25,52 +27,86 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ⭐ 設定香港時間
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 
-# 內存儲存所有提醒
+# ⭐ MongoDB 連接
+try:
+    mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+    # 測試連接
+    mongo_client.admin.command('ping')
+    db = mongo_client['reminder_bot']
+    reminders_collection = db['reminders']
+    print("✅ Connected to MongoDB")
+except ServerSelectionTimeoutError:
+    print("❌ Failed to connect to MongoDB")
+    reminders_collection = None
+except Exception as e:
+    print(f"❌ MongoDB error: {e}")
+    reminders_collection = None
+
+# 內存快取（減少 database 查詢）
 reminders = {}
 
-# ⭐ JSON 檔案路徑
-REMINDERS_FILE = "reminders.json"
 
-
-def load_reminders():
-    """從 JSON 檔案讀取提醒。"""
+def load_reminders_from_db():
+    """從 MongoDB 讀取所有提醒到內存。"""
     global reminders
     try:
-        if os.path.exists(REMINDERS_FILE):
-            with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # 轉換 user_id 回 int，datetime 回 datetime object
-                reminders = {}
-                for user_id_str, user_reminders in data.items():
-                    user_id = int(user_id_str)
-                    reminders[user_id] = []
-                    for r in user_reminders:
-                        r["time"] = datetime.fromisoformat(r["time"])
-                        reminders[user_id].append(r)
-                print(f"✅ Loaded {sum(len(v) for v in reminders.values())} reminders from file")
-        else:
+        if not reminders_collection:
+            print("⚠ MongoDB not available, using empty cache")
             reminders = {}
-            print("📄 No existing reminders file, starting fresh")
+            return
+        
+        reminders = {}
+        for doc in reminders_collection.find():
+            user_id = doc["user_id"]
+            if user_id not in reminders:
+                reminders[user_id] = []
+            
+            # 轉換 datetime string 回 datetime object
+            r = doc.copy()
+            r.pop("_id", None)  # 移除 MongoDB _id
+            r["time"] = datetime.fromisoformat(r["time"])
+            reminders[user_id].append(r)
+        
+        total = sum(len(v) for v in reminders.values())
+        print(f"✅ Loaded {total} reminders from MongoDB")
     except Exception as e:
-        print(f"⚠ Error loading reminders: {e}")
+        print(f"⚠ Error loading reminders from DB: {e}")
         reminders = {}
 
 
-def save_reminders():
-    """把提醒 save 到 JSON 檔案。"""
+def save_reminder_to_db(user_id: int, reminder: dict):
+    """儲存單條提醒到 MongoDB。"""
     try:
-        data = {}
-        for user_id, user_reminders in reminders.items():
-            data[str(user_id)] = []
-            for r in user_reminders:
-                r_copy = r.copy()
-                r_copy["time"] = r_copy["time"].isoformat()
-                data[str(user_id)].append(r_copy)
+        if not reminders_collection:
+            return
         
-        with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        r = reminder.copy()
+        r["time"] = r["time"].isoformat()  # 轉換 datetime 為 string
+        r["user_id"] = user_id
+        
+        # Upsert：如果存在就更新，不存在就插入
+        reminders_collection.insert_one(r)
     except Exception as e:
-        print(f"⚠ Error saving reminders: {e}")
+        print(f"⚠ Error saving reminder to DB: {e}")
+
+
+def update_reminder_in_db(user_id: int, reminder_index: int, reminder: dict):
+    """更新提醒狀態（例如 sent=True）。"""
+    try:
+        if not reminders_collection:
+            return
+        
+        r = reminder.copy()
+        r["time"] = r["time"].isoformat()
+        r["user_id"] = user_id
+        
+        # 根據時間和內容找到並更新
+        reminders_collection.update_one(
+            {"user_id": user_id, "time": r["time"]},
+            {"$set": r}
+        )
+    except Exception as e:
+        print(f"⚠ Error updating reminder in DB: {e}")
 
 
 def extract_fields(text: str):
@@ -155,7 +191,7 @@ def parse_pickup_date(pickup_str: str):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    load_reminders()
+    load_reminders_from_db()
     check_reminders.start()
 
 
@@ -180,24 +216,25 @@ def add_reminder(
     remark: str,
     summary_only: bool,
 ):
-    """統一建立提醒的結構。加入 sent 欄位以追蹤是否已發送。"""
+    """統一建立提醒的結構，自動儲存到 MongoDB 和內存。"""
     if user_id not in reminders:
         reminders[user_id] = []
-    reminders[user_id].append(
-        {
-            "time": reminder_time,
-            "message": message,
-            "author": author,
-            "jump_url": jump_url,
-            "pickup_date": pickup_date,
-            "deal_method": deal_method,
-            "phone": phone,
-            "remark": remark,
-            "summary_only": summary_only,
-            "sent": False,
-        }
-    )
-    save_reminders()
+    
+    reminder_obj = {
+        "time": reminder_time,
+        "message": message,
+        "author": author,
+        "jump_url": jump_url,
+        "pickup_date": pickup_date,
+        "deal_method": deal_method,
+        "phone": phone,
+        "remark": remark,
+        "summary_only": summary_only,
+        "sent": False,
+    }
+    
+    reminders[user_id].append(reminder_obj)
+    save_reminder_to_db(user_id, reminder_obj)
 
 
 async def process_order_message(message: discord.Message):
@@ -219,7 +256,6 @@ async def process_order_message(message: discord.Message):
     # ---------- 自動 !r（提早兩日） ----------
     two_days_before = dt_pickup - timedelta(days=2)
     if two_days_before > now:
-        # 正常情況：提醒時間仍在未來 → 照常加入 reminder
         add_reminder(
             user_id=user_id,
             reminder_time=two_days_before,
@@ -237,7 +273,6 @@ async def process_order_message(message: discord.Message):
             f"   📅 Pickup: {pickup}"
         )
     else:
-        # 特殊情況：已過「兩日前」但仍未到取貨日 → 立即補發提醒
         if dt_pickup > now:
             channel = bot.get_channel(REMINDER_CHANNEL_ID)
             target_user = await bot.fetch_user(TARGET_USER_ID)
@@ -367,7 +402,6 @@ async def set_reminder_r(ctx, yymmdd: str):
             False,
         )
 
-        # < 2 days → 即時提醒
         diff = target_dt - now
         hours = diff.total_seconds() / 3600
         if hours < 48:
@@ -442,13 +476,12 @@ async def set_summary_reminder(ctx, yymmdd: str):
 async def list_reminders(ctx):
     """!list：顯示此用戶由指令發送時間開始的所有提醒。"""
     user_id = ctx.author.id
-    cmd_time = ctx.message.created_at.replace(tzinfo=pytz.UTC).astimezone(HK_TZ)  # 指令發送時間
+    cmd_time = ctx.message.created_at.replace(tzinfo=pytz.UTC).astimezone(HK_TZ)
 
     if user_id not in reminders or not reminders[user_id]:
         await send_reply("📭 You have no reminders.")
         return
 
-    # 過濾：時間 >= 指令發送時間
     future = [r for r in reminders[user_id] if r["time"] >= cmd_time]
     
     if not future:
@@ -499,7 +532,6 @@ async def list_today_summaries(ctx):
         await send_reply("📭 You have no reminders on this day.")
         return
 
-    # 過濾：日期 = 指令發送嗰日（任何時間、任何類型）
     cmd_y, cmd_m, cmd_d = cmd_time.year, cmd_time.month, cmd_time.day
     today = []
     for r in reminders[user_id]:
@@ -572,11 +604,6 @@ async def scan_old_messages_cmd(ctx, days: int = 7):
     except Exception as e:
         await send_reply(f"❌ Scan failed: {e}")
 
-@bot.command(name="save")
-async def manual_save(ctx):
-    """!save：手動 save reminders 到 JSON 檔案。"""
-    save_reminders()
-    await send_reply(f"✅ Saved {sum(len(v) for v in reminders.values())} reminders to file.")
 
 @bot.command(name="commands")
 async def show_commands(ctx):
@@ -607,18 +634,18 @@ Special:
 
 @tasks.loop(minutes=1)
 async def check_reminders():
-    """每分鐘檢查是否有提醒到時間。發送後標記 sent=True，唔再 delete。"""
+    """每分鐘檢查是否有提醒到時間。發送後標記 sent=True。"""
     now = datetime.now(HK_TZ)
 
     for user_id, user_reminders in list(reminders.items()):
         for r in user_reminders[:]:
-            # 如果時間到咗，且未發送過
             if now >= r["time"] and not r.get("sent", False):
                 try:
                     channel = bot.get_channel(REMINDER_CHANNEL_ID)
                     target_user = await bot.fetch_user(TARGET_USER_ID)
                     if not channel or not target_user:
-                        r["sent"] = True  # 標記已處理（避免重複）
+                        r["sent"] = True
+                        update_reminder_in_db(user_id, 0, r)
                         continue
 
                     summary_only = r.get("summary_only", False)
@@ -657,14 +684,13 @@ async def check_reminders():
 
                     await channel.send(f"{mentions} Reminder:", embed=embed)
                     
-                    # 標記已發送並 save
                     r["sent"] = True
-                    save_reminders()
+                    update_reminder_in_db(user_id, 0, r)
                     
                 except Exception as e:
                     print(f"Reminder failed: {e}")
                     r["sent"] = True
-                    save_reminders()
+                    update_reminder_in_db(user_id, 0, r)
 
 
 # 啟動 Replit keep-alive，再啟動 bot
