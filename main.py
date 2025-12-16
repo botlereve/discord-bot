@@ -572,6 +572,11 @@ async def scan_old_messages_cmd(ctx, days: int = 7):
     except Exception as e:
         await send_reply(f"❌ Scan failed: {e}")
 
+@bot.command(name="save")
+async def manual_save(ctx):
+    """!save：手動 save reminders 到 JSON 檔案。"""
+    save_reminders()
+    await send_reply(f"✅ Saved {sum(len(v) for v in reminders.values())} reminders to file.")
 
 @bot.command(name="commands")
 async def show_commands(ctx):
