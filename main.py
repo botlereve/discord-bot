@@ -692,6 +692,14 @@ async def check_reminders():
                     r["sent"] = True
                     update_reminder_in_db(user_id, 0, r)
 
+@bot.command(name="reload")
+async def reload_reminders(ctx):
+    """!reload：重新從 MongoDB 讀取所有提醒。"""
+    global reminders
+    load_reminders_from_db()
+    total = sum(len(v) for v in reminders.values())
+    await send_reply(f"✅ Reloaded {total} reminders from MongoDB")
+
 
 # 啟動 Replit keep-alive，再啟動 bot
 keep_alive()
