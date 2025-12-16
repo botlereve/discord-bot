@@ -4,6 +4,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import pytz
 import re
+import json
 
 # Replit keep-alive
 from keep_alive import keep_alive
@@ -26,6 +27,50 @@ HK_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # 內存儲存所有提醒
 reminders = {}
+
+# ⭐ JSON 檔案路徑
+REMINDERS_FILE = "reminders.json"
+
+
+def load_reminders():
+    """從 JSON 檔案讀取提醒。"""
+    global reminders
+    try:
+        if os.path.exists(REMINDERS_FILE):
+            with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # 轉換 user_id 回 int，datetime 回 datetime object
+                reminders = {}
+                for user_id_str, user_reminders in data.items():
+                    user_id = int(user_id_str)
+                    reminders[user_id] = []
+                    for r in user_reminders:
+                        r["time"] = datetime.fromisoformat(r["time"])
+                        reminders[user_id].append(r)
+                print(f"✅ Loaded {sum(len(v) for v in reminders.values())} reminders from file")
+        else:
+            reminders = {}
+            print("📄 No existing reminders file, starting fresh")
+    except Exception as e:
+        print(f"⚠ Error loading reminders: {e}")
+        reminders = {}
+
+
+def save_reminders():
+    """把提醒 save 到 JSON 檔案。"""
+    try:
+        data = {}
+        for user_id, user_reminders in reminders.items():
+            data[str(user_id)] = []
+            for r in user_reminders:
+                r_copy = r.copy()
+                r_copy["time"] = r_copy["time"].isoformat()
+                data[str(user_id)].append(r_copy)
+        
+        with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠ Error saving reminders: {e}")
 
 
 def extract_fields(text: str):
@@ -110,6 +155,7 @@ def parse_pickup_date(pickup_str: str):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    load_reminders()
     check_reminders.start()
 
 
@@ -148,9 +194,10 @@ def add_reminder(
             "phone": phone,
             "remark": remark,
             "summary_only": summary_only,
-            "sent": False,  # ⭐ 新增：追蹤是否已發送
+            "sent": False,
         }
     )
+    save_reminders()
 
 
 async def process_order_message(message: discord.Message):
@@ -605,12 +652,14 @@ async def check_reminders():
 
                     await channel.send(f"{mentions} Reminder:", embed=embed)
                     
-                    # ⭐ 改動：標記已發送，而唔係 remove
+                    # 標記已發送並 save
                     r["sent"] = True
+                    save_reminders()
                     
                 except Exception as e:
                     print(f"Reminder failed: {e}")
-                    r["sent"] = True  # 即使失敗都標記，避免無限重試
+                    r["sent"] = True
+                    save_reminders()
 
 
 # 啟動 Replit keep-alive，再啟動 bot
