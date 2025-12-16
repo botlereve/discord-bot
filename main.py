@@ -393,19 +393,19 @@ async def set_summary_reminder(ctx, yymmdd: str):
 
 @bot.command(name="list")
 async def list_reminders(ctx):
-    """!list：顯示此用戶全部未來的提醒（!time / !r / !t + !scan），包括已發送過的。"""
+    """!list：顯示此用戶由指令發送時間開始的所有提醒。"""
     user_id = ctx.author.id
-    now = datetime.now(HK_TZ)
+    cmd_time = ctx.message.created_at.replace(tzinfo=pytz.UTC).astimezone(HK_TZ)  # 指令發送時間
 
     if user_id not in reminders or not reminders[user_id]:
         await send_reply("📭 You have no reminders.")
         return
 
-    # 過濾：時間 >= 現在（即未來 + 現在這一刻）
-    future = [r for r in reminders[user_id] if r["time"] >= now]
+    # 過濾：時間 >= 指令發送時間
+    future = [r for r in reminders[user_id] if r["time"] >= cmd_time]
     
     if not future:
-        await send_reply("📭 You have no future reminders.")
+        await send_reply("📭 You have no reminders from now on.")
         return
 
     future.sort(key=lambda r: r["time"])
@@ -439,29 +439,29 @@ async def list_reminders(ctx):
             line += f" ｜ [Link]({r['jump_url']})"
         lines.append(line)
 
-    await send_reply("📝 **Future Reminders:**\n" + "\n".join(lines))
+    await send_reply("📝 **All Reminders from now:**\n" + "\n".join(lines))
 
 
 @bot.command(name="listtdy")
 async def list_today_summaries(ctx):
-    """!listtdy：顯示此用戶今日全部提醒（!r + !t + !scan），包括已發送過的。"""
+    """!listtdy：顯示此用戶指令發送嗰日的全部提醒。"""
     user_id = ctx.author.id
-    now = datetime.now(HK_TZ)
+    cmd_time = ctx.message.created_at.replace(tzinfo=pytz.UTC).astimezone(HK_TZ)
 
     if user_id not in reminders or not reminders[user_id]:
-        await send_reply("📭 You have no reminders today.")
+        await send_reply("📭 You have no reminders on this day.")
         return
 
-    # 過濾：日期 = 今日（任何時間，任何類型）
-    y, m, d = now.year, now.month, now.day
+    # 過濾：日期 = 指令發送嗰日（任何時間、任何類型）
+    cmd_y, cmd_m, cmd_d = cmd_time.year, cmd_time.month, cmd_time.day
     today = []
     for r in reminders[user_id]:
         t = r["time"]
-        if t.year == y and t.month == m and t.day == d:
+        if t.year == cmd_y and t.month == cmd_m and t.day == cmd_d:
             today.append(r)
 
     if not today:
-        await send_reply("📭 You have no reminders today.")
+        await send_reply("📭 You have no reminders on this day.")
         return
 
     today.sort(key=lambda r: r["time"])
@@ -487,7 +487,8 @@ async def list_today_summaries(ctx):
             line += f" ｜ [Link]({r['jump_url']})"
         lines.append(line)
 
-    await send_reply("📝 **Today's Reminders:**\n" + "\n".join(lines))
+    day_str = cmd_time.strftime("%Y-%m-%d")
+    await send_reply(f"📝 **Reminders on {day_str}:**\n" + "\n".join(lines))
 
 
 @bot.command(name="scan")
@@ -542,8 +543,8 @@ Manual:
 - `!t yymmdd` → reply a message, summary reminder on that date 09:00
 
 View:
-- `!list`    → all future reminders (!time / !r / !t / !scan)
-- `!listtdy` → today's all reminders (!time / !r / !t / !scan)
+- `!list`    → all reminders from now onwards
+- `!listtdy` → all reminders on the day you sent the command
 - `!scan [d]`→ scan past d days for 【訂單資料】 (default 7)
 
 Special:
