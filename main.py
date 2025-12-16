@@ -84,7 +84,6 @@ def save_reminder_to_db(user_id: int, reminder: dict):
         r["time"] = r["time"].isoformat()  # 轉換 datetime 為 string
         r["user_id"] = user_id
         
-        # Upsert：如果存在就更新，不存在就插入
         reminders_collection.insert_one(r)
     except Exception as e:
         print(f"⚠ Error saving reminder to DB: {e}")
@@ -217,6 +216,8 @@ def add_reminder(
     summary_only: bool,
 ):
     """統一建立提醒的結構，自動儲存到 MongoDB 和內存。"""
+    global reminders
+    
     if user_id not in reminders:
         reminders[user_id] = []
     
@@ -472,6 +473,15 @@ async def set_summary_reminder(ctx, yymmdd: str):
         await send_reply(f"❌ Failed to set summary reminder: {e}")
 
 
+@bot.command(name="reload")
+async def reload_reminders(ctx):
+    """!reload：重新從 MongoDB 讀取所有提醒。"""
+    global reminders
+    load_reminders_from_db()
+    total = sum(len(v) for v in reminders.values())
+    await send_reply(f"✅ Reloaded {total} reminders from MongoDB")
+
+
 @bot.command(name="list")
 async def list_reminders(ctx):
     """!list：顯示此用戶由指令發送時間開始的所有提醒。"""
@@ -624,6 +634,7 @@ Manual:
 View:
 - `!list`    → all reminders from now onwards
 - `!listtdy` → all reminders on the day you sent the command
+- `!reload`  → reload reminders from MongoDB
 - `!scan [d]`→ scan past d days for 【訂單資料】 (default 7)
 
 Special:
@@ -691,14 +702,6 @@ async def check_reminders():
                     print(f"Reminder failed: {e}")
                     r["sent"] = True
                     update_reminder_in_db(user_id, 0, r)
-
-@bot.command(name="reload")
-async def reload_reminders(ctx):
-    """!reload：重新從 MongoDB 讀取所有提醒。"""
-    global reminders
-    load_reminders_from_db()
-    total = sum(len(v) for v in reminders.values())
-    await send_reply(f"✅ Reloaded {total} reminders from MongoDB")
 
 
 # 啟動 Replit keep-alive，再啟動 bot
