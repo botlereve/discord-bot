@@ -134,7 +134,7 @@ def add_reminder(
     remark: str,
     summary_only: bool,
 ):
-    """統一建立提醒的結構。"""
+    """統一建立提醒的結構。加入 sent 欄位以追蹤是否已發送。"""
     if user_id not in reminders:
         reminders[user_id] = []
     reminders[user_id].append(
@@ -148,6 +148,7 @@ def add_reminder(
             "phone": phone,
             "remark": remark,
             "summary_only": summary_only,
+            "sent": False,  # ⭐ 新增：追蹤是否已發送
         }
     )
 
@@ -392,19 +393,17 @@ async def set_summary_reminder(ctx, yymmdd: str):
 
 @bot.command(name="list")
 async def list_reminders(ctx):
-    """!list：顯示此用戶全部未來的一般提醒（!time / !r）。"""
+    """!list：顯示此用戶全部未來的提醒（!time / !r / !t + !scan），包括已發送過的。"""
     user_id = ctx.author.id
     now = datetime.now(HK_TZ)
 
     if user_id not in reminders or not reminders[user_id]:
-        await send_reply("📭 You have no future reminders.")
+        await send_reply("📭 You have no reminders.")
         return
 
-    future = [
-        r
-        for r in reminders[user_id]
-        if r["time"] > now and not r.get("summary_only", False)
-    ]
+    # 過濾：時間 >= 現在（即未來 + 現在這一刻）
+    future = [r for r in reminders[user_id] if r["time"] >= now]
+    
     if not future:
         await send_reply("📭 You have no future reminders.")
         return
@@ -417,6 +416,7 @@ async def list_reminders(ctx):
         deal = r.get("deal_method")
         phone = r.get("phone")
         remark = r.get("remark")
+        sent_status = "✅ Sent" if r.get("sent", False) else "⏳ Pending"
 
         parts = []
         if pickup:
@@ -434,39 +434,34 @@ async def list_reminders(ctx):
             base = r["message"]
             preview = base[:30] + "…" if len(base) > 30 else base
 
-        line = f"{idx}. {t_str} ｜ {preview}"
+        line = f"{idx}. [{sent_status}] {t_str} ｜ {preview}"
         if r.get("jump_url"):
-            line += f" ｜ [Original message]({r['jump_url']})"
+            line += f" ｜ [Link]({r['jump_url']})"
         lines.append(line)
 
-    await send_reply("📝 **Future Reminder:**\n" + "\n".join(lines))
+    await send_reply("📝 **Future Reminders:**\n" + "\n".join(lines))
 
 
 @bot.command(name="listtdy")
 async def list_today_summaries(ctx):
-    """!listtdy：顯示此用戶今天全部 !t 摘要提醒。"""
+    """!listtdy：顯示此用戶今日全部提醒（!r + !t + !scan），包括已發送過的。"""
     user_id = ctx.author.id
     now = datetime.now(HK_TZ)
 
     if user_id not in reminders or not reminders[user_id]:
-        await send_reply("📭 You have no summary reminders today.")
+        await send_reply("📭 You have no reminders today.")
         return
 
+    # 過濾：日期 = 今日（任何時間，任何類型）
     y, m, d = now.year, now.month, now.day
     today = []
     for r in reminders[user_id]:
         t = r["time"]
-        if (
-            r.get("summary_only", False)
-            and t.year == y
-            and t.month == m
-            and t.day == d
-            and t >= now
-        ):
+        if t.year == y and t.month == m and t.day == d:
             today.append(r)
 
     if not today:
-        await send_reply("📭 You have no future summary reminders today.")
+        await send_reply("📭 You have no reminders today.")
         return
 
     today.sort(key=lambda r: r["time"])
@@ -476,6 +471,7 @@ async def list_today_summaries(ctx):
         phone = r.get("phone")
         deal = r.get("deal_method")
         remark = r.get("remark")
+        sent_status = "✅ Sent" if r.get("sent", False) else "⏳ Pending"
 
         parts = []
         if phone:
@@ -486,12 +482,12 @@ async def list_today_summaries(ctx):
             parts.append(f"Remark: {remark}")
 
         preview = " ｜ ".join(parts) if parts else "(No details)"
-        line = f"{idx}. {t_str} ｜ {preview}"
+        line = f"{idx}. [{sent_status}] {t_str} ｜ {preview}"
         if r.get("jump_url"):
-            line += f" ｜ [Original message]({r['jump_url']})"
+            line += f" ｜ [Link]({r['jump_url']})"
         lines.append(line)
 
-    await send_reply("📝 **Today's Summary Reminders:**\n" + "\n".join(lines))
+    await send_reply("📝 **Today's Reminders:**\n" + "\n".join(lines))
 
 
 @bot.command(name="scan")
@@ -546,8 +542,8 @@ Manual:
 - `!t yymmdd` → reply a message, summary reminder on that date 09:00
 
 View:
-- `!list`    → all future reminders (!time / !r)
-- `!listtdy` → today's summary reminders (!t)
+- `!list`    → all future reminders (!time / !r / !t / !scan)
+- `!listtdy` → today's all reminders (!time / !r / !t / !scan)
 - `!scan [d]`→ scan past d days for 【訂單資料】 (default 7)
 
 Special:
@@ -558,17 +554,18 @@ Special:
 
 @tasks.loop(minutes=1)
 async def check_reminders():
-    """每分鐘檢查是否有提醒到時間。"""
+    """每分鐘檢查是否有提醒到時間。發送後標記 sent=True，唔再 delete。"""
     now = datetime.now(HK_TZ)
 
     for user_id, user_reminders in list(reminders.items()):
         for r in user_reminders[:]:
-            if now >= r["time"]:
+            # 如果時間到咗，且未發送過
+            if now >= r["time"] and not r.get("sent", False):
                 try:
                     channel = bot.get_channel(REMINDER_CHANNEL_ID)
                     target_user = await bot.fetch_user(TARGET_USER_ID)
                     if not channel or not target_user:
-                        user_reminders.remove(r)
+                        r["sent"] = True  # 標記已處理（避免重複）
                         continue
 
                     summary_only = r.get("summary_only", False)
@@ -606,10 +603,13 @@ async def check_reminders():
                         mentions += f" {second_user.mention}"
 
                     await channel.send(f"{mentions} Reminder:", embed=embed)
-                    user_reminders.remove(r)
+                    
+                    # ⭐ 改動：標記已發送，而唔係 remove
+                    r["sent"] = True
+                    
                 except Exception as e:
                     print(f"Reminder failed: {e}")
-                    user_reminders.remove(r)
+                    r["sent"] = True  # 即使失敗都標記，避免無限重試
 
 
 # 啟動 Replit keep-alive，再啟動 bot
