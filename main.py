@@ -43,8 +43,8 @@ def extract_fields(text: str):
         return part.splitlines()[0].strip() if part else None
 
     pickup = _after_keyword(text, "取貨日期")
-    deal   = _after_keyword(text, "交收方式")
-    phone  = _after_keyword(text, "聯絡人電話")
+    deal = _after_keyword(text, "交收方式")
+    phone = _after_keyword(text, "聯絡人電話")
     remark = _after_keyword(text, "Remark")
 
     return pickup, deal, phone, remark
@@ -168,9 +168,10 @@ async def process_order_message(message: discord.Message):
     user_id = message.author.id
     now = datetime.now(HK_TZ)
 
-    # 自動 !r（提早兩日）
+    # ---------- 自動 !r（提早兩日） ----------
     two_days_before = dt_pickup - timedelta(days=2)
     if two_days_before > now:
+        # 正常情況：提醒時間仍在未來 → 照常加入 reminder
         add_reminder(
             user_id=user_id,
             reminder_time=two_days_before,
@@ -187,8 +188,28 @@ async def process_order_message(message: discord.Message):
             f"✅ Auto-set !r Reminder: {two_days_before.strftime('%Y-%m-%d %H:%M')}\n"
             f"   📅 Pickup: {pickup}"
         )
+    else:
+        # 特殊情況：已過「兩日前」但仍未到取貨日 → 立即補發提醒
+        if dt_pickup > now:
+            channel = bot.get_channel(REMINDER_CHANNEL_ID)
+            target_user = await bot.fetch_user(TARGET_USER_ID)
+            if channel and target_user:
+                embed = discord.Embed(
+                    title="⏰ Reminder Time! (auto from scan)",
+                    description=full_text,
+                    color=discord.Color.orange(),
+                )
+                embed.set_author(name=f"From: {message.author}")
+                embed.set_footer(text=f"Pickup: {dt_pickup.strftime('%Y-%m-%d %H:%M')}")
+                if message.jump_url:
+                    embed.description += f"\n\n[🔗 Original message]({message.jump_url})"
+                await channel.send(f"{target_user.mention} Reminder:", embed=embed)
+                await send_reply(
+                    "⚠️ Scan found order less than 2 days from pickup – "
+                    "sent reminder immediately."
+                )
 
-    # 自動 !t（當日）
+    # ---------- 自動 !t（當日摘要提醒） ----------
     if dt_pickup > now:
         add_reminder(
             user_id=user_id,
