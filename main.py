@@ -446,9 +446,10 @@ async def set_reminder_time(ctx, hours: int, minutes: int = 0):
 @bot.command(name="scan")
 async def scan_orders(ctx, days: int = 7):
     """!scan [days]：掃過去 N 日所有 channel 嘅【訂單資料】訊息，自動設定提醒。"""
-    if ctx.author.id != TARGET_USER_ID and ctx.author.id != SECOND_USER_ID:
-        await send_reply("❌ Only authorized users can use this command.")
-        return
+    # 臨時移除權限檢查（測試用）
+    # if ctx.author.id != TARGET_USER_ID and ctx.author.id != SECOND_USER_ID:
+    #     await send_reply("❌ Only authorized users can use this command.")
+    #     return
 
     try:
         await send_reply(f"⏳ Scanning last {days} days...")
