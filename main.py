@@ -537,7 +537,7 @@ async def show_orders_by_date(ctx, date_arg: str):
     !d yymm：顯示指定月份嘅訂單
     """
     try:
-        if len(date_arg) == 6:
+        if len(date_arg) == 4:
             # !d yymm - 顯示月份所有訂單
             yymm = date_arg
             matching = {k: v for k, v in orders_cache.items() if k.startswith(yymm)}
@@ -564,7 +564,7 @@ async def show_orders_by_date(ctx, date_arg: str):
                     if order['remark']:
                         msg_lines.append(f"      📝 {order['remark']}")
         
-        elif len(date_arg) == 8:
+        elif len(date_arg) == 6:
             # !d yymmdd - 顯示特定日期訂單
             yymmdd = date_arg
             orders = orders_cache.get(yymmdd, [])
