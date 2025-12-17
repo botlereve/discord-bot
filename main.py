@@ -537,7 +537,7 @@ async def show_orders_by_date(ctx, date_arg: str):
     !d yymm：顯示指定月份嘅訂單
     """
     try:
-        if len(date_arg) == 4:
+        if len(date_arg) == 6:
             # !d yymm - 顯示月份所有訂單
             yymm = date_arg
             matching = {k: v for k, v in orders_cache.items() if k.startswith(yymm)}
@@ -564,7 +564,7 @@ async def show_orders_by_date(ctx, date_arg: str):
                     if order['remark']:
                         msg_lines.append(f"      📝 {order['remark']}")
         
-        elif len(date_arg) == 6:
+        elif len(date_arg) == 8:
             # !d yymmdd - 顯示特定日期訂單
             yymmdd = date_arg
             orders = orders_cache.get(yymmdd, [])
@@ -601,8 +601,13 @@ async def show_orders_by_date(ctx, date_arg: str):
         
         # 分割發送（Discord 2000 字符限制）
         full_text = "\n".join(msg_lines)
-        for chunk in [full_text[i:i+1990] for i in range(0, len(full_text), 1990)]:
-            await send_reply(chunk)
+        reminder_channel = bot.get_channel(REMINDER_CHANNEL_ID)
+        if reminder_channel:
+            for chunk in [full_text[i:i+1990] for i in range(0, len(full_text), 1990)]:
+                await reminder_channel.send(chunk)
+            await send_reply(f"✅ Orders sent to #reminders.")
+        else:
+            await send_reply(f"❌ REMINDER_CHANNEL not found.")
     
     except Exception as e:
         await send_reply(f"❌ Failed to show orders: {e}")
