@@ -498,6 +498,22 @@ async def scan_orders(ctx, days: int = 7):
                                             remark=remark,
                                             summary_only=False,
                                         )
+                                    else:
+                                        # 已少於 2 日 → 即刻發出提醒一次
+                                        if dt_pickup > now:
+                                            target_user = await bot.fetch_user(TARGET_USER_ID)
+                                            reminder_ch = bot.get_channel(REMINDER_CHANNEL_ID)
+                                            if reminder_ch and target_user:
+                                                embed = discord.Embed(
+                                                    title="⏰ Reminder Time! (auto, <2 days)",
+                                                    description=msg.content,
+                                                    color=discord.Color.orange(),
+                                                )
+                                                embed.set_author(name=f"From: {msg.author}")
+                                                embed.set_footer(text=f"Pickup: {dt_pickup.strftime('%Y-%m-%d %H:%M')}")
+                                                if msg.jump_url:
+                                                    embed.description += f"\n\n[🔗 Original message]({msg.jump_url})"
+                                                await reminder_ch.send(f"{target_user.mention} Reminder:", embed=embed)
                                     
                                     # 當日摘要提醒
                                     if dt_pickup > now:
