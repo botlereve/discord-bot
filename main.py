@@ -479,6 +479,41 @@ async def scan_orders(ctx, days: int = 7):
                                         remark=remark,
                                         full_message=msg.content,
                                     )
+                                    
+                                    # ✅ 自動創建提醒（2日前 + 當日摘要）
+                                    user_id = msg.author.id
+                                    two_days_before = dt_pickup - timedelta(days=2)
+                                    
+                                    # 2 日前提醒
+                                    if two_days_before > now:
+                                        add_reminder(
+                                            user_id=user_id,
+                                            reminder_time=two_days_before,
+                                            message=msg.content,
+                                            author=str(msg.author),
+                                            jump_url=msg.jump_url,
+                                            pickup_date=pickup_str,
+                                            deal_method=deal,
+                                            phone=phone,
+                                            remark=remark,
+                                            summary_only=False,
+                                        )
+                                    
+                                    # 當日摘要提醒
+                                    if dt_pickup > now:
+                                        add_reminder(
+                                            user_id=user_id,
+                                            reminder_time=dt_pickup,
+                                            message=msg.content,
+                                            author=str(msg.author),
+                                            jump_url=msg.jump_url,
+                                            pickup_date=pickup_str,
+                                            deal_method=deal,
+                                            phone=phone,
+                                            remark=remark,
+                                            summary_only=True,
+                                        )
+                                    
                                     count += 1
                 except Exception as e:
                     print(f"⚠ Error scanning {channel.name}: {e}")
