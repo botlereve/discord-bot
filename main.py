@@ -444,13 +444,9 @@ async def set_reminder_time(ctx, hours: int, minutes: int = 0):
 
 
 @bot.command(name="scan")
+@commands.has_permissions(administrator=True)
 async def scan_orders(ctx, days: int = 7):
-    """!scan [days]：掃過去 N 日所有 channel 嘅【訂單資料】訊息，自動設定提醒。"""
-    # 臨時移除權限檢查（測試用）
-    # if ctx.author.id != TARGET_USER_ID and ctx.author.id != SECOND_USER_ID:
-    #     await send_reply("❌ Only authorized users can use this command.")
-    #     return
-
+    """!scan [days]：掃過去 N 日所有 channel 嘅【訂單資料】訊息，自動設定提醒。(Admin only)"""
     try:
         await send_reply(f"⏳ Scanning last {days} days...")
         
@@ -490,6 +486,13 @@ async def scan_orders(ctx, days: int = 7):
         await send_reply(f"✅ Scan complete. Found and saved {count} new orders.")
     except Exception as e:
         await send_reply(f"❌ Scan failed: {e}")
+
+
+@scan_orders.error
+async def scan_orders_error(ctx, error):
+    """處理 !scan 的權限錯誤。"""
+    if isinstance(error, commands.MissingPermissions):
+        await send_reply("❌ You need **Administrator** permission to use `!scan`.")
 
 
 @bot.command(name="tdy")
