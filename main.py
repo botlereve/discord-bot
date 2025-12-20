@@ -193,44 +193,66 @@ class ParserService:
         return None, None
 
     @staticmethod
-    def parse_order_content_smart(text: str) -> List[str]:
-        """Parse items with smart fallback strategies."""
-        if "訂單內容" not in text:
-            return []
+   def parse_order_content(text: str):
+    """
+    Improved parsing:
+    1. Splits by specific keywords to isolate content
+    2. Reads line by line
+    3. Handles "Product x 1" AND "Product" (implicit x1)
+    """
+    if "訂單內容" not in text:
+        return []
 
-        content_part = text.split("訂單內容")[1]
-        for keyword in ["總數", "取貨日期", "交收方式"]:
-            if keyword in content_part:
-                content_part = content_part.split(keyword)[0]
+    # 1. Isolate the content section
+    content_part = text.split("訂單內容")[1]
+    
+    # Cut off at the next section keywords
+    # Added more keywords to be safe
+    for keyword in ["總數", "取貨日期", "交收方式", "Remark", "聯絡人", "Total"]:
+        if keyword in content_part:
+            content_part = content_part.split(keyword)[0]
 
-        content_part = content_part.strip()
-        content_part = ParserService.normalize_sizes(content_part)
+    items = []
+    
+    # 2. Process line by line
+    lines = content_part.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Filter out separator lines or symbols
+        # If line is just "---" or "===" or "【】", skip it
+        if all(c in '-=*_ []【】' for c in line):
+            continue
+
+        # 3. Detect Quantity
+        # Looks for x 1, × 1, * 1 at the end of the line
+        qty = 1
+        product = line
         
-        items = []
+        # Regex: match x/×/* followed by digits at the very end
+        match = re.search(r'[\s×x\*]+(\d+)$', line, re.IGNORECASE)
         
-        # Strategy 1: Look for × or x pattern
-        pattern = r'([^×\n]+?)\s*(?:×|x)\s*(\d+)'
-        matches = re.findall(pattern, content_part)
+        if match:
+            try:
+                qty_str = match.group(1)
+                qty = int(qty_str)
+                # Remove the " x 1" part from the product name
+                product = line[:match.start()].strip()
+            except:
+                qty = 1
         
-        if matches:
-            for product, qty in matches:
-                product = product.strip()
-                if product and len(product) < 100:
-                    try:
-                        qty_int = int(qty)
-                        if validator.is_reasonable_quantity(qty_int):
-                            items.append(f"{product} × {qty_int}")
-                    except:
-                        items.append(f"{product} × 1")
-            return items
+        # 4. Clean up Product Name
+        # Remove leading bullets (*, -) or numbers (1.)
+        product = product.lstrip('*-•1234567890. ')
         
-        # Strategy 2: Line-by-line if no × found
-        for line in content_part.split("\n"):
-            line = line.strip()
-            if line and len(line) < 100 and line not in ['總數', '取貨日期']:
-                items.append(f"{line} × 1")
-        
-        return items
+        # Final check to ensure it's a real product
+        if len(product) > 1:
+            items.append(f"{product} × {qty}")
+
+    return items
 
     @staticmethod
     def consolidate_items(items_list: List[str]) -> Dict[str, int]:
