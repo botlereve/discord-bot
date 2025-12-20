@@ -198,62 +198,48 @@ def parse_pickup_date(pickup_str: str):
     return None, None
 
 def parse_order_content(text: str):
-    """
-    Extract items from order content.
-    Improved to handle WhatsApp *Bold* and implicit quantities.
-    Preserves size indicators like 6" and 8".
-    """
-    if "訂單內容" not in text:
+    if "訂單內容" not in text and "Orders for" not in text:
         return []
 
-    content_part = text.split("訂單內容")[1]
+    content_part = text.split("訂單內容")[1] if "訂單內容" in text else text
 
-    # FIX: Remove WhatsApp *Bold* formatting (paired asterisks)
     content_part = re.sub(r'\*([^*]+)\*', r'\1', content_part)
 
-    # Stop at next section (Total, Date, Method)
-    for keyword in ["總數", "取貨日期", "交收方式"]:
+    for keyword in ["總數", "取貨日期", "交收方式", "="]:
         if keyword in content_part:
             content_part = content_part.split(keyword)[0]
 
     content_part = content_part.strip()
     items = []
 
-    # Process line by line
     lines = content_part.split('\n')
 
     for line in lines:
         line = line.strip()
-        if not line:
+        if not line or len(line) < 2:
             continue
 
-        # Filter out separator lines or symbols
-        if all(c in '-=*_ []【】' for c in line):
+        if all(c in '-=*_ []【】=＝' for c in line):
             continue
 
-        # Detect Quantity
         qty = 1
         product = line
 
-        # Regex: match x/×/* followed by digits at the very end
-        match = re.search(r'[\s×x\*]+(\d+)$', line, re.IGNORECASE)
-
+        # FIXED: Handle trailing commas
+        match = re.search(r'[\s×x\*]+(\d+)[\s,]*$', line, re.IGNORECASE)
         if match:
-            try:
-                qty_str = match.group(1)
-                qty = int(qty_str)
-                product = line[:match.start()].strip()
-            except:
-                qty = 1
+            qty_str = match.group(1)
+            qty = int(qty_str)
+            product = line[:match.start()].strip()
 
-        # Clean up Product Name
-        product = product.lstrip('*-•1234567890. ')
+        # FIXED: Remove smart quotes + regular quotes
+        product = product.lstrip('*-•1234567890. "‘"״„‚‚‘’"「」')
 
-        # Final check to ensure it's a real product
-        if len(product) > 1:
+        if len(product) > 2:
             items.append(f"{product} × {qty}")
 
     return items
+
 
 def consolidate_items(items_list):
     """Consolidate duplicate items."""
