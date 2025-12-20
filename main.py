@@ -1,3 +1,4 @@
+from cake_select_view import setup_cake_order_ui
 import os
 import discord
 from discord.ext import commands, tasks
@@ -22,7 +23,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 
-from cake_select_view import setup_cake_order_ui
 setup_cake_order_ui(bot)
 
 # ---------- MongoDB ----------
