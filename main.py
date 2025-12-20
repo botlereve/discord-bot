@@ -248,23 +248,12 @@ def parse_pickup_date(pickup_str: str):
     return None, None
 
 
-def normalize_sizes(text: str):
-    """
-    Normalize size formats to standard Chinese format (吋).
-    6" → 6吋, 6″ → 6吋, 6" → 6吋, etc.
-    Handles decimal sizes too: 6.5" → 6.5吋
-    """
-    # Replace all variants of inches with 吋
-    text = re.sub(r'(\d+\.?\d*)\s*["″""]', r'\1吋', text)
-    return text
-
-
 def parse_order_content(text: str):
     """
     Extract items from 訂單內容 section.
-    Normalizes sizes first, then extracts items with quantities.
+    Handles both single-line and multi-line formats.
     Returns list of items with quantities.
-    Example: ["6吋 威士忌朱古力 拿破崙 × 1", "8吋 半熟芝士 × 2"]
+    Example: ["薄朱 拿破崙 × 1", "薄朱 達克瓦茲 × 1"]
     """
     if "訂單內容" not in text:
         return []
@@ -280,9 +269,6 @@ def parse_order_content(text: str):
 
     content_part = content_part.strip()
     
-    # Normalize sizes FIRST
-    content_part = normalize_sizes(content_part)
-    
     # Use regex to find all items with format "product × quantity"
     items = []
     pattern = r'([^×\n]+?)\s*(?:×|x)\s*(\d+)'
@@ -294,12 +280,6 @@ def parse_order_content(text: str):
             product = product.strip()
             if product and product not in ['總數', '取貨日期']:
                 items.append(f"{product} × {qty}")
-    else:
-        # No "×" format found, try line-by-line parsing
-        for line in content_part.split("\n"):
-            line = line.strip()
-            if line and line not in ['總數', '取貨日期']:
-                items.append(f"{line} × 1")
     
     # Clean up items - remove empty ones
     items = [item.strip() for item in items if item.strip()]
