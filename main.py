@@ -43,7 +43,6 @@ except Exception as e:
 reminders = {}
 orders_cache = {}
 
-
 def load_reminders_from_db():
     """啟動時從 MongoDB 載入所有提醒到內存。"""
     global reminders
@@ -66,7 +65,6 @@ def load_reminders_from_db():
     except Exception as e:
         print(f"⚠ Error loading reminders from DB: {e}")
         reminders = {}
-
 
 def load_orders_from_db():
     """從 MongoDB 載入所有訂單到快取。"""
@@ -91,7 +89,6 @@ def load_orders_from_db():
         print(f"⚠ Error loading orders from DB: {e}")
         orders_cache = {}
 
-
 def save_reminder_to_db(user_id: int, reminder: dict):
     """儲存單條提醒到 MongoDB。"""
     try:
@@ -103,7 +100,6 @@ def save_reminder_to_db(user_id: int, reminder: dict):
         reminders_collection.insert_one(r)
     except Exception as e:
         print(f"⚠ Error saving reminder to DB: {e}")
-
 
 def update_reminder_in_db(user_id: int, reminder: dict):
     """更新提醒（例如 sent=True）。"""
@@ -120,7 +116,6 @@ def update_reminder_in_db(user_id: int, reminder: dict):
     except Exception as e:
         print(f"⚠ Error updating reminder in DB: {e}")
 
-
 def save_order_to_db(order: dict):
     """儲存訂單到 MongoDB。"""
     try:
@@ -130,8 +125,8 @@ def save_order_to_db(order: dict):
     except Exception as e:
         print(f"⚠ Error saving order to DB: {e}")
 
-
 # ---------- 共用工具 ----------
+
 async def send_reply(message: str):
     """所有回覆都送去 BOT_COMMAND_CHANNEL。"""
     channel = bot.get_channel(BOT_COMMAND_CHANNEL_ID)
@@ -139,7 +134,6 @@ async def send_reply(message: str):
         await channel.send(message)
     else:
         print(f"⚠ BOT_COMMAND_CHANNEL_ID not found: {BOT_COMMAND_CHANNEL_ID}")
-
 
 def extract_fields(text: str):
     """從【訂單資料】訊息中抽取字段。"""
@@ -156,13 +150,14 @@ def extract_fields(text: str):
     deal = _after_keyword(text, "交收方式")
     phone = _after_keyword(text, "聯絡人電話")
     remark = _after_keyword(text, "Remark")
-    return pickup, deal, phone, remark
 
+    return pickup, deal, phone, remark
 
 def parse_pickup_date(pickup_str: str):
     """解析取貨日期，支援多種格式。"""
     if not pickup_str:
         return None, None
+
     try:
         m = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", pickup_str)
         if m:
@@ -196,50 +191,73 @@ def parse_pickup_date(pickup_str: str):
             dt = HK_TZ.localize(datetime(y, mth, d, 9, 0))
             yymmdd = dt.strftime("%y%m%d")
             return dt, yymmdd
+
     except Exception as e:
         print(f"⚠ parse_pickup_date error: {e}")
+
     return None, None
 
-
 def parse_order_content(text: str):
-    """Extract items - FIXED to ignore * and symbols"""
+    """
+    Extract items from order content.
+    Improved to handle WhatsApp *Bold* and implicit quantities.
+    Preserves size indicators like 6" and 8".
+    """
     if "訂單內容" not in text:
         return []
 
     content_part = text.split("訂單內容")[1]
-    
-    # Stop at next section
+
+    # FIX: Remove WhatsApp *Bold* formatting (paired asterisks)
+    content_part = re.sub(r'\*([^*]+)\*', r'\1', content_part)
+
+    # Stop at next section (Total, Date, Method)
     for keyword in ["總數", "取貨日期", "交收方式"]:
         if keyword in content_part:
             content_part = content_part.split(keyword)[0]
 
     content_part = content_part.strip()
     items = []
-    
-    # Look for items with × or x pattern
-    pattern = r'([^×\n*\-\+\=\【\】]+?)\s*(?:×|x)\s*(\d+)'
-    matches = re.findall(pattern, content_part)
-    
-    if matches:
-        for product, qty in matches:
-            product = product.strip()
-            # FILTER OUT: empty, too short, just symbols
-            if (product and len(product) > 2 and len(product) < 100 and 
-                product not in ['×', 'x', '*', '-', '+', '=', '】', '【']):
-                try:
-                    qty_int = int(qty)
-                    if 0 < qty_int <= 1000:
-                        items.append(f"{product} × {qty_int}")
-                except:
-                    pass
-    
-    return items
 
+    # Process line by line
+    lines = content_part.split('\n')
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Filter out separator lines or symbols
+        if all(c in '-=*_ []【】' for c in line):
+            continue
+
+        # Detect Quantity
+        qty = 1
+        product = line
+
+        # Regex: match x/×/* followed by digits at the very end
+        match = re.search(r'[\s×x\*]+(\d+)$', line, re.IGNORECASE)
+
+        if match:
+            try:
+                qty_str = match.group(1)
+                qty = int(qty_str)
+                product = line[:match.start()].strip()
+            except:
+                qty = 1
+
+        # Clean up Product Name
+        product = product.lstrip('*-•1234567890. ')
+
+        # Final check to ensure it's a real product
+        if len(product) > 1:
+            items.append(f"{product} × {qty}")
+
+    return items
 
 def consolidate_items(items_list):
     """Consolidate duplicate items."""
     consolidated = {}
-
     for item in items_list:
         if "×" in item or "x" in item:
             parts = item.replace("×", "x").split("x")
@@ -255,7 +273,6 @@ def consolidate_items(items_list):
         consolidated[product_name] = consolidated.get(product_name, 0) + qty
 
     return consolidated
-
 
 def add_reminder(
     user_id: int,
@@ -273,6 +290,7 @@ def add_reminder(
     global reminders
     if user_id not in reminders:
         reminders[user_id] = []
+
     obj = {
         "time": reminder_time,
         "message": message,
@@ -285,9 +303,9 @@ def add_reminder(
         "summary_only": summary_only,
         "sent": False,
     }
+
     reminders[user_id].append(obj)
     save_reminder_to_db(user_id, obj)
-
 
 def add_order(
     author: str,
@@ -303,6 +321,7 @@ def add_order(
     global orders_cache
     if yymmdd not in orders_cache:
         orders_cache[yymmdd] = []
+
     obj = {
         "yymmdd": yymmdd,
         "yymm": yymmdd[:4],
@@ -315,26 +334,26 @@ def add_order(
         "full_message": full_message,
         "timestamp": datetime.now(HK_TZ).isoformat(),
     }
+
     orders_cache[yymmdd].append(obj)
     save_order_to_db(obj)
 
-
 # ---------- 事件 / 指令 ----------
+
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    
+
     # SYNC SLASH COMMANDS
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"❌ Failed to sync slash commands: {e}")
-    
+
     load_reminders_from_db()
     load_orders_from_db()
     check_reminders.start()
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -344,9 +363,8 @@ async def on_message(message: discord.Message):
 
     if "【訂單資料】" in message.content:
         await process_order_message(message)
-    
-    await bot.process_commands(message)
 
+    await bot.process_commands(message)
 
 async def process_order_message(message: discord.Message):
     """自動幫【訂單資料】設定 2 日前 + 當日提醒，並儲存訂單。"""
@@ -376,8 +394,9 @@ async def process_order_message(message: discord.Message):
     now = datetime.now(HK_TZ)
     user_id = message.author.id
 
-    # 2 日前提醒（!r 自動化）
+    # 2 日前提醒（自動化）
     two_days_before = dt_pickup - timedelta(days=2)
+
     if two_days_before > now:
         add_reminder(
             user_id=user_id,
@@ -400,17 +419,22 @@ async def process_order_message(message: discord.Message):
         if dt_pickup > now:
             channel = bot.get_channel(REMINDER_CHANNEL_ID)
             target_user = await bot.fetch_user(TARGET_USER_ID)
+
             if channel and target_user:
                 embed = discord.Embed(
                     title="⏰ Reminder Time! (auto, <2 days)",
                     description=full_text,
                     color=discord.Color.orange(),
                 )
+
                 embed.set_author(name=f"From: {message.author}")
                 embed.set_footer(text=f"Pickup: {dt_pickup.strftime('%Y-%m-%d %H:%M')}")
+
                 if message.jump_url:
                     embed.description += f"\n\n[🔗 Original message]({message.jump_url})"
+
                 await channel.send(f"{target_user.mention} Reminder:", embed=embed)
+
             await send_reply("⚠️ Auto reminder sent because pickup < 2 days.")
 
     # 當日摘要提醒
@@ -433,7 +457,6 @@ async def process_order_message(message: discord.Message):
             f" 📅 Pickup: {pickup}"
         )
 
-
 @bot.command(name="time")
 async def set_reminder_time(ctx, hours: int, minutes: int = 0):
     """!time h m：reply 一條訊息，設定 h 小時 m 分鐘後提醒一次。"""
@@ -444,9 +467,11 @@ async def set_reminder_time(ctx, hours: int, minutes: int = 0):
     try:
         now = datetime.now(HK_TZ)
         reminder_time = now + timedelta(hours=hours, minutes=minutes)
+
         replied = await ctx.channel.fetch_message(ctx.message.reference.message_id)
         full_text = replied.content
         pickup, deal, phone, remark = extract_fields(full_text)
+
         user_id = ctx.author.id
 
         add_reminder(
@@ -465,9 +490,9 @@ async def set_reminder_time(ctx, hours: int, minutes: int = 0):
         await send_reply(
             f"✅ One-time reminder set for {reminder_time.strftime('%Y-%m-%d %H:%M')}"
         )
+
     except Exception as e:
         await send_reply(f"❌ Failed to set reminder: {e}")
-
 
 @bot.command(name="tdy")
 async def show_today_orders(ctx):
@@ -494,7 +519,7 @@ async def show_today_orders(ctx):
                 msg_lines.append(f" [View Message]({order['jump_url']})")
 
         full_text = "\n".join(msg_lines)
-        
+
         # Send to TODAY_REMINDER_CHANNEL_ID
         if TODAY_REMINDER_CHANNEL_ID > 0:
             channel = bot.get_channel(TODAY_REMINDER_CHANNEL_ID)
@@ -506,9 +531,9 @@ async def show_today_orders(ctx):
                 await send_reply("❌ TODAY_REMINDER_CHANNEL_ID not found.")
         else:
             await send_reply("❌ TODAY_REMINDER_CHANNEL_ID not set.")
+
     except Exception as e:
         await send_reply(f"❌ Failed to show today's orders: {e}")
-
 
 @bot.command(name="d")
 async def check_order_details(ctx, date_arg: str):
@@ -543,10 +568,11 @@ async def check_order_details(ctx, date_arg: str):
                     date_str = yymmdd
 
                 msg_lines.append(f"\n**📅 {date_str}** ({len(orders)} orders)")
+
                 for i, order in enumerate(orders, 1):
-                    msg_lines.append(f"  #{i} - {order['author']} | 📞 {order['phone'] or 'N/A'} | 📍 {order['deal_method'] or 'N/A'}")
+                    msg_lines.append(f" #{i} - {order['author']} | 📞 {order['phone'] or 'N/A'} | 📍 {order['deal_method'] or 'N/A'}")
                     if order["remark"]:
-                        msg_lines.append(f"      📝 {order['remark']}")
+                        msg_lines.append(f" 📝 {order['remark']}")
 
         else:  # len == 6
             # !d yymmdd - specific date
@@ -559,6 +585,7 @@ async def check_order_details(ctx, date_arg: str):
                     date_str = dt.strftime("%Y-%m-%d")
                 except:
                     date_str = yymmdd
+
                 await send_reply(f"❌ No orders found for {date_str}.")
                 return
 
@@ -582,7 +609,7 @@ async def check_order_details(ctx, date_arg: str):
 
         # Send to REMINDER_CHANNEL
         full_text = "\n".join(msg_lines)
-        
+
         if REMINDER_CHANNEL_ID > 0:
             channel = bot.get_channel(REMINDER_CHANNEL_ID)
             if channel:
@@ -596,7 +623,6 @@ async def check_order_details(ctx, date_arg: str):
 
     except Exception as e:
         await send_reply(f"❌ Failed to check orders: {e}")
-
 
 @bot.command(name="c")
 async def check_order_contents(ctx, date_arg: str):
@@ -625,7 +651,6 @@ async def check_order_contents(ctx, date_arg: str):
 
             for yymmdd in sorted(matching.keys()):
                 orders = matching[yymmdd]
-
                 try:
                     dt = datetime.strptime(yymmdd, "%y%m%d")
                     date_str = dt.strftime("%Y年%m月%d日")
@@ -645,13 +670,15 @@ async def check_order_contents(ctx, date_arg: str):
                 msg_lines.append(
                     f"\n📅 **{date_str}** (Total: {sum(daily_items.values())} 件)"
                 )
+
                 for product, qty in sorted(daily_items.items()):
-                    msg_lines.append(f"  - {product} × {qty}")
+                    msg_lines.append(f" - {product} × {qty}")
 
             msg_lines.append("\n" + "=" * 60)
             msg_lines.append(f"**Month Total: {sum(total_all_items.values())} 件**")
+
             for product, qty in sorted(total_all_items.items()):
-                msg_lines.append(f"  - {product} × {qty}")
+                msg_lines.append(f" - {product} × {qty}")
 
         else:  # len == 6
             # !c yymmdd - specific date
@@ -664,6 +691,7 @@ async def check_order_contents(ctx, date_arg: str):
                     date_str = dt.strftime("%Y年%m月%d日")
                 except:
                     date_str = yymmdd
+
                 await send_reply(f"❌ No orders found for {date_str}.")
                 return
 
@@ -693,6 +721,7 @@ async def check_order_contents(ctx, date_arg: str):
 
         # Send to #cake channel
         full_text = "\n".join(msg_lines)
+
         for guild in bot.guilds:
             for channel in guild.text_channels:
                 if channel.name.lower() == "cake":
@@ -700,12 +729,11 @@ async def check_order_contents(ctx, date_arg: str):
                         await channel.send(chunk)
                     await send_reply("✅ Order contents sent to #cake.")
                     return
-        
+
         await send_reply("❌ #cake channel not found.")
 
     except Exception as e:
         await send_reply(f"❌ Failed to check orders: {e}")
-
 
 @bot.tree.command(
     name="cake_order",
@@ -719,37 +747,42 @@ async def cake_order(interaction: discord.Interaction):
             description="Select Size → Type → Product → Add to Cart",
             color=discord.Color.gold()
         )
+
         embed.add_field(name="Coming Soon", value="Interface will be added soon!")
-        
+
         await interaction.response.send_message(
             embed=embed,
             ephemeral=False
         )
-        
+
     except Exception as e:
         await interaction.response.send_message(
             f"❌ Error: {str(e)[:100]}",
             ephemeral=True
         )
-        print(f"Cake order error: {e}")
 
+    print(f"Cake order error: {e}")
 
 # ---------- 定時檢查 ----------
+
 @tasks.loop(minutes=1)
 async def check_reminders():
     """每分鐘檢查有冇到時間嘅提醒。"""
     now = datetime.now(HK_TZ)
+
     for user_id, user_rems in list(reminders.items()):
         for r in user_rems[:]:
             if now >= r["time"] and not r.get("sent", False):
                 try:
                     target_user = await bot.fetch_user(TARGET_USER_ID)
+
                     if not target_user:
                         r["sent"] = True
                         update_reminder_in_db(user_id, r)
                         continue
 
                     summary_only = r.get("summary_only", False)
+
                     if summary_only:
                         lines = ["Today's Pickup / Delivery:"]
                         if r.get("phone"):
@@ -770,10 +803,12 @@ async def check_reminders():
 
                     embed.set_author(name=f"From: {r['author']}")
                     embed.set_footer(text=f"Time: {r['time'].strftime('%Y-%m-%d %H:%M')}")
+
                     if r.get("jump_url"):
                         embed.description += f"\n\n[🔗 Original message]({r['jump_url']})"
 
                     mentions = target_user.mention
+
                     if summary_only:
                         try:
                             second_user = await bot.fetch_user(SECOND_USER_ID)
@@ -794,11 +829,12 @@ async def check_reminders():
 
                     r["sent"] = True
                     update_reminder_in_db(user_id, r)
+
                 except Exception as e:
                     print(f"Reminder failed: {e}")
                     r["sent"] = True
                     update_reminder_in_db(user_id, r)
 
-
 # ---------- 啟動 ----------
+
 bot.run(BOT_TOKEN)
