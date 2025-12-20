@@ -1,6 +1,14 @@
+# ============================================================
+# INTEGRATED BOT - COMMAND-CORRECTED VERSION
+# Your commands FIXED to match original behavior:
+# !d = show order DATE/details (who ordered, phone, location)
+# !c = show order COUNT/contents (cake types and quantities)
+# ============================================================
+
 import os
 import discord
 from discord.ext import commands, tasks
+from discord import ui, app_commands, SelectOption, Interaction
 from datetime import datetime, timedelta
 import pytz
 import re
@@ -11,7 +19,13 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError
-from keep_alive import keep_alive
+
+# ========= KEEP ALIVE (Optional) =========
+try:
+    from keep_alive import keep_alive
+except ImportError:
+    def keep_alive():
+        pass
 
 # ========= LOGGING SETUP =========
 logging.basicConfig(
@@ -20,20 +34,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========= 環境變數 =========
+# ========= ENVIRONMENT VARIABLES =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-REMINDER_CHANNEL_ID = int(os.getenv("REMINDER_CHANNEL_ID"))
-TODAY_REMINDER_CHANNEL_ID = int(os.getenv("TODAY_REMINDER_CHANNEL_ID"))
-TARGET_USER_ID = int(os.getenv("TARGET_USER_ID"))
-SECOND_USER_ID = int(os.getenv("SECOND_USER_ID"))
-BOT_COMMAND_CHANNEL_ID = int(os.getenv("BOT_COMMAND_CHANNEL_ID"))
+REMINDER_CHANNEL_ID = int(os.getenv("REMINDER_CHANNEL_ID", "0") or "0")
+TODAY_REMINDER_CHANNEL_ID = int(os.getenv("TODAY_REMINDER_CHANNEL_ID", "0") or "0")
+TARGET_USER_ID = int(os.getenv("TARGET_USER_ID", "0") or "0")
+SECOND_USER_ID = int(os.getenv("SECOND_USER_ID", "0") or "0")
+BOT_COMMAND_CHANNEL_ID = int(os.getenv("BOT_COMMAND_CHANNEL_ID", "0") or "0")
 MONGODB_URI = os.getenv("MONGODB_URI")
 
 # ========= BOT SETUP =========
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-bot.description = "Order & Reminder Management Bot"
+bot.description = "Order & Reminder Management Bot + Cake Ordering System"
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 
 # ========= CACHE LOCK =========
@@ -72,6 +86,8 @@ def init_mongodb():
 # ========= CACHES =========
 reminders: Dict[int, List[dict]] = {}
 orders_cache: Dict[str, List[dict]] = {}
+user_carts: Dict[int, List[dict]] = {}
+user_order_details: Dict[int, dict] = {}
 
 # ========= INPUT VALIDATOR =========
 class InputValidator:
@@ -101,191 +117,6 @@ class InputValidator:
         return 0 < qty <= 1000
 
 validator = InputValidator()
-
-# ========= RATE LIMITER =========
-class RateLimiter:
-    """Prevent abuse with rate limiting."""
-    
-    def __init__(self, max_per_minute: int = 10):
-        self.user_commands = defaultdict(list)
-        self.max_commands_per_minute = max_per_minute
-    
-    def is_rate_limited(self, user_id: int) -> bool:
-        """Check if user exceeded rate limit."""
-        now = datetime.now(HK_TZ)
-        one_min_ago = now - timedelta(minutes=1)
-        
-        self.user_commands[user_id] = [
-            cmd_time for cmd_time in self.user_commands[user_id]
-            if cmd_time > one_min_ago
-        ]
-        
-        if len(self.user_commands[user_id]) >= self.max_commands_per_minute:
-            return True
-        
-        self.user_commands[user_id].append(now)
-        return False
-
-rate_limiter = RateLimiter()
-
-# ========= SMART CACHE =========
-class SmartOrderCache:
-    """Cache with deduplication and integrity checks."""
-    
-    def __init__(self):
-        self.orders = {}
-        self.seen_urls = set()
-        self.content_hashes = {}
-    
-    def is_duplicate(self, jump_url: str, full_message: str) -> bool:
-        """Check if order already exists."""
-        if jump_url in self.seen_urls:
-            return True
-        
-        content_hash = hashlib.md5(full_message.encode()).hexdigest()
-        if content_hash in self.content_hashes.values():
-            return True
-        
-        return False
-    
-    def add_order(self, yymmdd: str, order: dict) -> bool:
-        """Add order only if not duplicate. Returns True if added."""
-        if self.is_duplicate(order["jump_url"], order["full_message"]):
-            logger.debug(f"Skipped duplicate order: {order['jump_url']}")
-            return False
-        
-        if yymmdd not in self.orders:
-            self.orders[yymmdd] = []
-        
-        self.orders[yymmdd].append(order)
-        self.seen_urls.add(order["jump_url"])
-        
-        content_hash = hashlib.md5(order["full_message"].encode()).hexdigest()
-        self.content_hashes[order["jump_url"]] = content_hash
-        return True
-    
-    def get(self, key: str, default=None):
-        """Dict-like access."""
-        return self.orders.get(key, default)
-    
-    def items(self):
-        """Dict-like iteration."""
-        return self.orders.items()
-    
-    def keys(self):
-        """Dict-like keys."""
-        return self.orders.keys()
-
-smart_cache = SmartOrderCache()
-
-# ========= BOT STATS =========
-class BotStats:
-    """Track bot performance and health."""
-    
-    def __init__(self):
-        self.start_time = datetime.now(HK_TZ)
-        self.orders_processed = 0
-        self.reminders_sent = 0
-        self.errors = defaultdict(int)
-    
-    def record_order(self):
-        self.orders_processed += 1
-    
-    def record_reminder(self):
-        self.reminders_sent += 1
-    
-    def record_error(self, error_type: str):
-        self.errors[error_type] += 1
-    
-    def get_stats(self) -> str:
-        uptime = datetime.now(HK_TZ) - self.start_time
-        total_reminders = sum(len(v) for v in reminders.values())
-        total_orders = sum(len(v) for v in orders_cache.items()) if orders_cache else 0
-        
-        return f"""📊 **Bot Statistics**
-━━━━━━━━━━━━━━━━━━━━━━
-⏱️  Uptime: {uptime}
-📦 Orders Processed: {self.orders_processed}
-⏰ Reminders Sent: {self.reminders_sent}
-❌ Errors: {sum(self.errors.values())}
-💾 Reminders in Cache: {total_reminders}
-📋 Order Dates in Cache: {len(orders_cache)}
-"""
-
-bot_stats = BotStats()
-
-# ========= MONGODB HEALTH CHECK =========
-async def check_mongodb_health() -> bool:
-    """Verify MongoDB connection is alive."""
-    try:
-        if mongo_client:
-            mongo_client.admin.command("ping")
-            return True
-    except Exception as e:
-        logger.error(f"MongoDB health check failed: {e}")
-    return False
-
-async def ensure_mongodb_connected() -> bool:
-    """Attempt to reconnect if connection lost."""
-    global mongo_client, reminders_collection, orders_collection
-    
-    if not await check_mongodb_health():
-        logger.warning("Attempting to reconnect to MongoDB...")
-        if init_mongodb():
-            return True
-    return await check_mongodb_health()
-
-# ========= DATA PERSISTENCE =========
-class DataPersistence:
-    """Ensure data is safely persisted with backups."""
-    
-    @staticmethod
-    async def backup_cache_to_db():
-        """Sync cache to database as backup."""
-        try:
-            if reminders_collection is None or orders_collection is None:
-                return
-            
-            for yymmdd, orders in orders_cache.items():
-                for order in orders:
-                    try:
-                        existing = orders_collection.find_one({
-                            "yymmdd": yymmdd,
-                            "jump_url": order["jump_url"]
-                        })
-                        if not existing:
-                            orders_collection.insert_one(order)
-                    except Exception as e:
-                        logger.warning(f"Backup error for {yymmdd}: {e}")
-            
-            logger.info("✅ Cache backup complete")
-        except Exception as e:
-            logger.error(f"Backup failed: {e}")
-    
-    @staticmethod
-    async def verify_data_integrity() -> bool:
-        """Check for corrupted data."""
-        issues = []
-        
-        for yymmdd, orders in orders_cache.items():
-            if not isinstance(orders, list):
-                issues.append(f"Invalid orders type for {yymmdd}")
-            for order in orders:
-                if not order.get("jump_url"):
-                    issues.append(f"Order missing jump_url")
-        
-        for user_id, rems in reminders.items():
-            if not isinstance(rems, list):
-                issues.append(f"Invalid reminders type for user {user_id}")
-        
-        if issues:
-            logger.warning(f"Integrity issues: {len(issues)} found")
-            return False
-        
-        logger.info("✅ Data integrity check passed")
-        return True
-
-data_persistence = DataPersistence()
 
 # ========= PARSER SERVICE =========
 class ParserService:
@@ -429,8 +260,8 @@ parser_service = ParserService()
 class OrderService:
     """Handle all order-related operations."""
     
-    def __init__(self, cache: SmartOrderCache):
-        self.cache = cache
+    def __init__(self):
+        self.cache = orders_cache
 
     def add_order(
         self,
@@ -444,6 +275,13 @@ class OrderService:
         full_message: str,
     ) -> bool:
         """Add order to cache. Returns True if added (not duplicate)."""
+        if yymmdd not in self.cache:
+            self.cache[yymmdd] = []
+        
+        # Check for duplicates
+        if any(o["jump_url"] == jump_url for o in self.cache[yymmdd]):
+            return False
+        
         obj = {
             "yymmdd": yymmdd,
             "yymm": yymmdd[:4],
@@ -457,11 +295,9 @@ class OrderService:
             "timestamp": datetime.now(HK_TZ).isoformat(),
         }
         
-        if self.cache.add_order(yymmdd, obj):
-            self.save_order_to_db(obj)
-            bot_stats.record_order()
-            return True
-        return False
+        self.cache[yymmdd].append(obj)
+        self.save_order_to_db(obj)
+        return True
 
     def save_order_to_db(self, order: dict) -> None:
         """Save order to MongoDB."""
@@ -471,10 +307,41 @@ class OrderService:
             orders_collection.insert_one(order)
         except Exception as e:
             logger.warning(f"Error saving order to DB: {e}")
-            bot_stats.record_error("db_write")
 
-    def format_orders_for_date(self, yymmdd: str) -> Optional[str]:
-        """Format orders for !c output."""
+    def format_orders_detail(self, yymmdd: str) -> Optional[str]:
+        """
+        Format orders for !d output (show order details: who, phone, location, remark)
+        This shows: Author, Phone, Delivery Method, Remark, Link
+        """
+        orders = self.cache.get(yymmdd, [])
+        if not orders:
+            return None
+
+        try:
+            dt = datetime.strptime(yymmdd, "%y%m%d")
+            date_str = dt.strftime("%Y年%m月%d日")
+        except:
+            date_str = yymmdd
+
+        lines = [f"📋 **Orders for {date_str}** - Total: {len(orders)}"]
+        lines.append("=" * 60)
+
+        for i, order in enumerate(orders, 1):
+            lines.append(f"\n**Order #{i}**")
+            lines.append(f"👤 Author: {order['author']}")
+            lines.append(f"📞 Phone: {order['phone'] or 'N/A'}")
+            lines.append(f"📍 Delivery: {order['deal_method'] or 'N/A'}")
+            lines.append(f"📝 Remark: {order['remark'] or 'N/A'}")
+            if order["jump_url"]:
+                lines.append(f"🔗 [View]({order['jump_url']})")
+
+        return "\n".join(lines)
+
+    def format_orders_content(self, yymmdd: str) -> Optional[str]:
+        """
+        Format orders for !c output (show order contents: what cakes and quantities)
+        This shows: consolidated items × quantities
+        """
         orders = self.cache.get(yymmdd, [])
         if not orders:
             return None
@@ -492,18 +359,46 @@ class OrderService:
             for product, qty in consolidated.items():
                 all_items[product] = all_items.get(product, 0) + qty
 
-        lines = [f"Orders for {date_str}"]
-        total_qty = 0
+        lines = [f"📋 **Orders for {date_str}**"]
         
         for product, qty in sorted(all_items.items()):
-            lines.append(f"{product} × {qty}")
-            total_qty += qty
+            lines.append(f"- {product} × {qty}")
 
-        lines.append("=" * 60 + f" 總數： {total_qty}件")
+        lines.append("=" * 60)
+        lines.append(f"**總數： {sum(all_items.values())}件**")
+
         return "\n".join(lines)
 
-    def format_orders_for_month(self, yymm: str) -> Optional[str]:
-        """Format all orders for a month."""
+    def format_month_detail(self, yymm: str) -> Optional[str]:
+        """Format all orders detail for a month (!d yymm)."""
+        matching = {k: v for k, v in self.cache.items() if k.startswith(yymm)}
+        if not matching:
+            return None
+
+        msg_lines = [f"📋 **Orders for {yymm}**"]
+        msg_lines.append("=" * 60)
+
+        for yymmdd in sorted(matching.keys()):
+            orders = matching[yymmdd]
+            
+            try:
+                dt = datetime.strptime(yymmdd, "%y%m%d")
+                date_str = dt.strftime("%Y年%m月%d日")
+            except:
+                date_str = yymmdd
+
+            msg_lines.append(f"\n**📅 {date_str}** ({len(orders)} orders)")
+            for i, order in enumerate(orders, 1):
+                msg_lines.append(
+                    f" #{i} 📞 {order['phone'] or 'N/A'} | 📍 {order['deal_method'] or 'N/A'}"
+                )
+                if order['remark']:
+                    msg_lines.append(f"    📝 {order['remark']}")
+
+        return "\n".join(msg_lines)
+
+    def format_month_content(self, yymm: str) -> Optional[str]:
+        """Format all orders content for a month (!c yymm)."""
         matching = {k: v for k, v in self.cache.items() if k.startswith(yymm)}
         if not matching:
             return None
@@ -532,16 +427,16 @@ class OrderService:
 
             msg_lines.append(f"\n**{date_str}** (Total: {sum(daily_items.values())} 件)")
             for product, qty in sorted(daily_items.items()):
-                msg_lines.append(f"  {product} × {qty}")
+                msg_lines.append(f"  - {product} × {qty}")
 
         msg_lines.append("\n" + "=" * 60)
         msg_lines.append(f"**Month Total: {sum(total_all_items.values())} 件**")
         for product, qty in sorted(total_all_items.items()):
-            msg_lines.append(f"  {product} × {qty}")
+            msg_lines.append(f"  - {product} × {qty}")
 
         return "\n".join(msg_lines)
 
-order_service = OrderService(smart_cache)
+order_service = OrderService()
 
 # ========= REMINDER SERVICE =========
 class ReminderService:
@@ -593,7 +488,6 @@ class ReminderService:
             reminders_collection.insert_one(r)
         except Exception as e:
             logger.warning(f"Error saving reminder: {e}")
-            bot_stats.record_error("reminder_save")
 
     def update_reminder_in_db(self, user_id: int, reminder: dict) -> None:
         """Update reminder in MongoDB."""
@@ -649,14 +543,14 @@ def load_orders_from_db() -> None:
             if not yymmdd:
                 continue
             
+            if yymmdd not in orders_cache:
+                orders_cache[yymmdd] = []
+            
             o = doc.copy()
             o.pop("_id", None)
-            
-            if smart_cache.add_order(yymmdd, o):
-                # Only count if not duplicate
-                bot_stats.record_order()
+            orders_cache[yymmdd].append(o)
         
-        total = sum(len(v) for v in smart_cache.items())
+        total = sum(len(v) for v in orders_cache.values())
         logger.info(f"✅ Loaded {total} orders")
     except Exception as e:
         logger.warning(f"Error loading orders: {e}")
@@ -665,6 +559,9 @@ def load_orders_from_db() -> None:
 async def send_reply(message: str) -> None:
     """Send reply to BOT_COMMAND_CHANNEL."""
     try:
+        if BOT_COMMAND_CHANNEL_ID == 0:
+            logger.warning("BOT_COMMAND_CHANNEL_ID not set")
+            return
         channel = bot.get_channel(BOT_COMMAND_CHANNEL_ID)
         if channel:
             await channel.send(message)
@@ -672,11 +569,12 @@ async def send_reply(message: str) -> None:
             logger.warning(f"Command channel not found: {BOT_COMMAND_CHANNEL_ID}")
     except Exception as e:
         logger.error(f"Error sending reply: {e}")
-        bot_stats.record_error("send_reply")
 
 async def send_today_reminder(embed: discord.Embed, mentions: str = "") -> None:
     """Send reminder to TODAY_REMINDER_CHANNEL."""
     try:
+        if TODAY_REMINDER_CHANNEL_ID == 0:
+            return
         channel = bot.get_channel(TODAY_REMINDER_CHANNEL_ID)
         if channel:
             if mentions:
@@ -687,7 +585,6 @@ async def send_today_reminder(embed: discord.Embed, mentions: str = "") -> None:
             logger.warning(f"Today reminder channel not found")
     except Exception as e:
         logger.error(f"Error sending today reminder: {e}")
-        bot_stats.record_error("send_today_reminder")
 
 async def send_to_cake_channel(message: str) -> bool:
     """Send message to #cake channel."""
@@ -712,11 +609,343 @@ async def send_to_cake_channel(message: str) -> bool:
                     return True
     except Exception as e:
         logger.error(f"Error sending to cake channel: {e}")
-        bot_stats.record_error("cake_channel")
     
     return False
 
-# ========= EVENTS & COMMANDS =========
+# ========= CAKE ORDER PRODUCTS =========
+PRODUCTS = {
+    "Mini": {
+        "瑪德蓮 Madeleine": {
+            "經典檸檬 Classic Lemon": 22,
+            "雙重朱古力 Double Chocolate": 32,
+            "小山園脆殼焙茶 Koyamaen Crispy Tea": 32,
+            "雙重開心果 Double Pistachio (Limited) ✨️": 36,
+        },
+        "達克瓦茲 Dacquoise": {
+            "粟米忌廉 Corn Cream (Limited) ✨️": 34,
+        },
+        "費南雪 Financier / 可麗露 Canelé": {
+            "費南雪 Financier": 22,
+            "可麗露 Canelé": 26,
+            "咖啡費南雪 Coffee Financier (Limited) ✨️": 26,
+        }
+    },
+    "3\"": {
+        "法式蛋糕 French Pastry": {
+            "威士忌長胡椒朱古力拿破崙 Whiskey Long Pepper Chocolate Mille Feuille": 62,
+            "柚香金萱烏龍聖多諾黑 Yuzu Jin Xuan Oolong St. Honoré": 58,
+            "栗子蜜柑蒙布朗 Mont Blanc": 58,
+            "蘋果酥盒 Apple Box": 52,
+        }
+    },
+    "6\"": {
+        "節慶蛋糕 / Whole Cake": {
+            "威士忌長胡椒朱古力拿破崙 Whiskey Long Pepper": 438,
+            "柚香金萱烏龍聖多諾黑 Yuzu Jin Xuan Oolong": 388,
+            "法式蘋果撻 French Apple Tart": 408,
+            "栗子蜜柑蒙布朗 Mont Blanc": 408,
+        }
+    },
+    "8\"": {
+        "節慶蛋糕 / Whole Cake": {
+            "柚香金萱烏龍聖多諾黑 Yuzu Jin Xuan Oolong": 588,
+            "焦糖咖啡千層蛋糕 Caramel Coffee Crêpe Cake": 608,
+            "芒草伯爵茶千層蛋糕 Earl Grey Mango Crêpe": 618,
+            "薄荷朱古力拿破崙 Mint Chocolate Mille Feuille": 618,
+            "威士忌長胡椒朱古力拿破崙 Whiskey Long Pepper": 688,
+        }
+    }
+}
+
+# ========= CAKE ORDER COMPONENTS =========
+class SizeSelect(ui.Select):
+    def __init__(self):
+        options = [
+            SelectOption(label="Mini ($22-$36)", value="Mini", emoji="🍡"),
+            SelectOption(label="3\" French Pastry ($52-$62)", value="3\"", emoji="🥐"),
+            SelectOption(label="6\" Whole Cake ($388-$438)", value="6\"", emoji="🎂"),
+            SelectOption(label="8\" Whole Cake ($588-$688)", value="8\"", emoji="🍰"),
+        ]
+        super().__init__(
+            placeholder="📏 Select Size",
+            options=options,
+            custom_id="size_select"
+        )
+    
+    async def callback(self, interaction: Interaction):
+        await interaction.response.defer()
+
+class TypeSelect(ui.Select):
+    def __init__(self, size: str):
+        options = []
+        if size in PRODUCTS:
+            for type_name in PRODUCTS[size].keys():
+                options.append(SelectOption(label=type_name, value=type_name))
+        
+        super().__init__(
+            placeholder="📋 Select Type",
+            options=options[:25],
+            custom_id="type_select"
+        )
+    
+    async def callback(self, interaction: Interaction):
+        await interaction.response.defer()
+
+class ProductSelect(ui.Select):
+    def __init__(self, size: str, type_name: str):
+        options = []
+        if size in PRODUCTS and type_name in PRODUCTS[size]:
+            for product_name, price in PRODUCTS[size][type_name].items():
+                label = f"{product_name[:75]} (${price})"
+                if len(label) > 100:
+                    label = f"{product_name[:60]}... (${price})"
+                options.append(SelectOption(label=label, value=f"{product_name}|{price}"))
+        
+        super().__init__(
+            placeholder="🍰 Select Product",
+            options=options[:25],
+            custom_id="product_select"
+        )
+    
+    async def callback(self, interaction: Interaction):
+        await interaction.response.defer()
+
+class OrderBuilderView(ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.selected_size = None
+        self.selected_type = None
+        self.selected_product = None
+        self.selected_price = None
+        self.quantity = 1
+        
+        self.add_item(SizeSelect())
+        self.add_item(ConfirmButton(self, "size"))
+
+class ConfirmButton(ui.Button):
+    def __init__(self, view, step):
+        super().__init__(label="✓ Confirm", style=discord.ButtonStyle.green)
+        self.view = view
+        self.step = step
+    
+    async def callback(self, interaction: Interaction):
+        if self.step == "size":
+            size_select = None
+            for item in self.view.children:
+                if isinstance(item, SizeSelect):
+                    size_select = item
+                    break
+            
+            if size_select and size_select.values:
+                self.view.selected_size = size_select.values[0]
+                self.view.clear_items()
+                self.view.add_item(SizeSelect())
+                self.view.add_item(TypeSelect(self.view.selected_size))
+                self.view.add_item(ConfirmButton(self.view, "type"))
+                await interaction.response.edit_message(view=self.view)
+            else:
+                await interaction.response.defer()
+        
+        elif self.step == "type":
+            type_select = None
+            for item in self.view.children:
+                if isinstance(item, TypeSelect):
+                    type_select = item
+                    break
+            
+            if type_select and type_select.values:
+                self.view.selected_type = type_select.values[0]
+                self.view.clear_items()
+                self.view.add_item(SizeSelect())
+                self.view.add_item(TypeSelect(self.view.selected_size))
+                self.view.add_item(ProductSelect(self.view.selected_size, self.view.selected_type))
+                self.view.add_item(ConfirmButton(self.view, "product"))
+                await interaction.response.edit_message(view=self.view)
+            else:
+                await interaction.response.defer()
+        
+        elif self.step == "product":
+            product_select = None
+            for item in self.view.children:
+                if isinstance(item, ProductSelect):
+                    product_select = item
+                    break
+            
+            if product_select and product_select.values:
+                product_value = product_select.values[0]
+                self.view.selected_product, price_str = product_value.split("|")
+                self.view.selected_price = int(price_str)
+                
+                self.view.clear_items()
+                self.view.add_item(AddToCartButton(self.view))
+                self.view.add_item(ViewCartButton(self.view.user_id))
+                await interaction.response.edit_message(view=self.view)
+            else:
+                await interaction.response.defer()
+
+class AddToCartButton(ui.Button):
+    def __init__(self, view):
+        super().__init__(label="🛒 Add to Cart", style=discord.ButtonStyle.green)
+        self.view = view
+    
+    async def callback(self, interaction: Interaction):
+        user_id = self.view.user_id
+        
+        if user_id not in user_carts:
+            user_carts[user_id] = []
+        
+        item = {
+            "size": self.view.selected_size,
+            "product": self.view.selected_product,
+            "quantity": self.view.quantity,
+            "unit_price": self.view.selected_price,
+            "subtotal": self.view.selected_price * self.view.quantity
+        }
+        
+        user_carts[user_id].append(item)
+        
+        embed = discord.Embed(
+            title="✅ Added to Cart",
+            description=f"{self.view.selected_size} {self.view.selected_product}\n"
+                       f"Qty: {self.view.quantity} × ${self.view.selected_price} = ${item['subtotal']}",
+            color=discord.Color.green()
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class ViewCartButton(ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="👀 View Cart", style=discord.ButtonStyle.blurple)
+        self.user_id = user_id
+    
+    async def callback(self, interaction: Interaction):
+        cart = user_carts.get(self.user_id, [])
+        
+        if not cart:
+            await interaction.response.send_message("Your cart is empty!", ephemeral=True)
+            return
+        
+        cart_lines = []
+        total_price = 0
+        total_qty = 0
+        
+        for i, item in enumerate(cart, 1):
+            line = f"{i}. {item['size']} {item['product']}\n   Qty: {item['quantity']} × ${item['unit_price']} = ${item['subtotal']}"
+            cart_lines.append(line)
+            total_price += item['subtotal']
+            total_qty += item['quantity']
+        
+        cart_text = "🛒 **Your Cart:**\n\n" + "\n\n".join(cart_lines)
+        cart_text += f"\n\n**TOTAL: ${total_price} ({total_qty} items)**"
+        
+        view = CheckoutView(self.user_id)
+        await interaction.response.send_message(cart_text, view=view, ephemeral=True)
+
+class OrderDetailsModal(ui.Modal, title="訂單詳情 Order Details"):
+    phone_number = ui.TextInput(
+        label="聯絡人電話 Phone Number (8 digits)",
+        placeholder="e.g., 12345678",
+        required=True,
+        min_length=8,
+        max_length=8
+    )
+    
+    pickup_date = ui.TextInput(
+        label="取貨日期 Pickup Date (YYYY-MM-DD)",
+        placeholder="e.g., 2025-12-25",
+        required=True
+    )
+    
+    pickup_time = ui.TextInput(
+        label="取貨時間 Pickup Time (Optional)",
+        placeholder="e.g., 14:00 或 TBC",
+        required=False
+    )
+    
+    delivery_location = ui.TextInput(
+        label="交收方式 Delivery Location",
+        placeholder="e.g., 尖沙咀 或 荃灣Studio",
+        required=True
+    )
+    
+    remark = ui.TextInput(
+        label="Remark (Optional)",
+        placeholder="Special requests",
+        required=False,
+        style=discord.TextStyle.paragraph
+    )
+    
+    async def on_submit(self, interaction: Interaction):
+        user_order_details[interaction.user.id] = {
+            "phone": self.phone_number.value,
+            "pickup_date": self.pickup_date.value,
+            "pickup_time": self.pickup_time.value or "TBC",
+            "delivery_location": self.delivery_location.value,
+            "remark": self.remark.value or "無"
+        }
+        await interaction.response.defer()
+
+class CheckoutView(ui.View):
+    def __init__(self, user_id):
+        super().__init__()
+        self.user_id = user_id
+    
+    @ui.button(label="📅 Add Delivery Details", style=discord.ButtonStyle.blurple)
+    async def add_details(self, interaction: Interaction, button: ui.Button):
+        await interaction.response.send_modal(OrderDetailsModal())
+    
+    @ui.button(label="✅ Finalize Order", style=discord.ButtonStyle.green)
+    async def finalize(self, interaction: Interaction, button: ui.Button):
+        cart = user_carts.get(self.user_id, [])
+        
+        if not cart:
+            await interaction.response.send_message("Cart is empty!", ephemeral=True)
+            return
+        
+        details = user_order_details.get(self.user_id, {})
+        phone = details.get("phone", "[PHONE]")
+        pickup_date = details.get("pickup_date", "[DATE]")
+        pickup_time = details.get("pickup_time", "[TIME]")
+        delivery_location = details.get("delivery_location", "[LOCATION]")
+        remark = details.get("remark", "無")
+        
+        items_text = []
+        total_price = 0
+        total_qty = 0
+        
+        for item in cart:
+            items_text.append(f"{item['size']} {item['product']} × {item['quantity']} (${item['unit_price']} each = ${item['subtotal']})")
+            total_price += item['subtotal']
+            total_qty += item['quantity']
+        
+        order_text = f"""Thanks for your purchase!✨️ 
+【訂單資料】
+聯絡人電話： {phone}
+訂單內容：
+{chr(10).join(items_text)}
+總數： ${total_price} （{total_qty}件）
+取貨日期： {pickup_date}
+取貨時間： {pickup_time}
+交收方式： {delivery_location}
+Remark： {remark}"""
+        
+        embed = discord.Embed(
+            title="📦 Order Summary",
+            description=f"```\n{order_text}\n```",
+            color=discord.Color.gold()
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        user_carts[self.user_id] = []
+        user_order_details[self.user_id] = {}
+    
+    @ui.button(label="🗑️ Clear Cart", style=discord.ButtonStyle.red)
+    async def clear(self, interaction: Interaction, button: ui.Button):
+        user_carts[self.user_id] = []
+        await interaction.response.send_message("Cart cleared!", ephemeral=True)
+
+# ========= EVENTS =========
 @bot.event
 async def on_ready() -> None:
     """Bot startup event."""
@@ -724,9 +953,6 @@ async def on_ready() -> None:
     load_reminders_from_db()
     load_orders_from_db()
     check_reminders.start()
-    cleanup_cache.start()
-    periodic_backup.start()
-    periodic_health_check.start()
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
@@ -739,30 +965,6 @@ async def on_message(message: discord.Message) -> None:
     
     await bot.process_commands(message)
 
-@bot.event
-async def on_command_error(ctx, error) -> None:
-    """Handle command errors."""
-    try:
-        if isinstance(error, commands.CommandNotFound):
-            await send_reply(f"❌ Command not found: {ctx.invoked_with}")
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await send_reply(f"❌ Missing argument: {error.param}")
-        elif isinstance(error, commands.MissingPermissions):
-            await send_reply("❌ You need **Administrator** permission.")
-        else:
-            logger.error(f"Command error: {error}")
-            await send_reply(f"❌ Error: {str(error)[:100]}")
-            bot_stats.record_error("command_error")
-    except Exception as e:
-        logger.error(f"Error in error handler: {e}")
-
-@bot.event
-async def on_disconnect() -> None:
-    """Handle bot disconnection."""
-    logger.warning("⚠️ Bot disconnected, backing up cache...")
-    await data_persistence.backup_cache_to_db()
-
-# ========= ORDER MESSAGE PROCESSING =========
 async def process_order_message(message: discord.Message) -> None:
     """Process incoming order message."""
     try:
@@ -777,7 +979,6 @@ async def process_order_message(message: discord.Message) -> None:
             )
             return
 
-        # Save order
         async with cache_lock:
             if not order_service.add_order(
                 author=str(message.author),
@@ -813,9 +1014,13 @@ async def process_order_message(message: discord.Message) -> None:
                 )
             await send_reply(f"✅ Reminder set for {two_days_before.strftime('%Y-%m-%d %H:%M')}")
         else:
-            if dt_pickup > now:
+            if dt_pickup > now and REMINDER_CHANNEL_ID > 0:
                 channel = bot.get_channel(REMINDER_CHANNEL_ID)
-                target_user = await bot.fetch_user(TARGET_USER_ID)
+                try:
+                    target_user = await bot.fetch_user(TARGET_USER_ID)
+                except:
+                    target_user = None
+                
                 if channel and target_user:
                     embed = discord.Embed(
                         title="⏰ Reminder (Auto, <2 days)",
@@ -847,7 +1052,6 @@ async def process_order_message(message: discord.Message) -> None:
     except Exception as e:
         logger.error(f"Error processing order: {e}")
         await send_reply(f"❌ Error processing order: {str(e)[:100]}")
-        bot_stats.record_error("process_order")
 
 # ========= COMMANDS =========
 @bot.command(name="time", help="Set reminder: !time <hours> [minutes]")
@@ -881,24 +1085,19 @@ async def set_reminder_time(ctx, hours: int, minutes: int = 0) -> None:
         await send_reply(f"✅ Reminder set for {reminder_time.strftime('%Y-%m-%d %H:%M')}")
     except Exception as e:
         await send_reply(f"❌ Failed: {str(e)[:100]}")
-        bot_stats.record_error("set_time")
 
-@bot.command(name="c", help="Check orders: !c yymmdd or !c yymm")
-async def check_orders(ctx, date_arg: str) -> None:
-    """Check orders by date with smart formatting."""
+@bot.command(name="d", help="Check order details: !d yymmdd or !d yymm")
+async def check_order_details(ctx, date_arg: str) -> None:
+    """Check order details (author, phone, location, remark)."""
     try:
-        if rate_limiter.is_rate_limited(ctx.author.id):
-            await send_reply("⚠️ Too many requests, please wait")
-            return
-        
         if not validator.validate_date_arg(date_arg):
-            await send_reply("❌ Invalid format. Use `!c yymmdd` or `!c yymm`")
+            await send_reply("❌ Invalid format. Use `!d yymmdd` or `!d yymm`")
             return
         
         if len(date_arg) == 6:
-            output = order_service.format_orders_for_date(date_arg)
+            output = order_service.format_orders_detail(date_arg)
         else:
-            output = order_service.format_orders_for_month(date_arg)
+            output = order_service.format_month_detail(date_arg)
         
         if not output:
             await send_reply(f"❌ No orders found for {date_arg}")
@@ -907,17 +1106,31 @@ async def check_orders(ctx, date_arg: str) -> None:
         sent = await send_to_cake_channel(output)
         await send_reply("✅ Results sent to #cake" if sent else "❌ #cake not found")
     except Exception as e:
-        logger.error(f"Check orders error: {e}")
+        logger.error(f"Check order details error: {e}")
         await send_reply(f"❌ Error: {str(e)[:100]}")
-        bot_stats.record_error("check_orders")
 
-@bot.command(name="stats", help="Show bot statistics")
-async def show_stats(ctx) -> None:
-    """Display bot statistics."""
+@bot.command(name="c", help="Check order contents: !c yymmdd or !c yymm")
+async def check_order_contents(ctx, date_arg: str) -> None:
+    """Check order contents (cakes and quantities)."""
     try:
-        await send_reply(bot_stats.get_stats())
+        if not validator.validate_date_arg(date_arg):
+            await send_reply("❌ Invalid format. Use `!c yymmdd` or `!c yymm`")
+            return
+        
+        if len(date_arg) == 6:
+            output = order_service.format_orders_content(date_arg)
+        else:
+            output = order_service.format_month_content(date_arg)
+        
+        if not output:
+            await send_reply(f"❌ No orders found for {date_arg}")
+            return
+        
+        sent = await send_to_cake_channel(output)
+        await send_reply("✅ Results sent to #cake" if sent else "❌ #cake not found")
     except Exception as e:
-        logger.error(f"Stats error: {e}")
+        logger.error(f"Check order contents error: {e}")
+        await send_reply(f"❌ Error: {str(e)[:100]}")
 
 @bot.command(name="tdy", help="Show today's orders")
 async def show_today_orders(ctx) -> None:
@@ -926,7 +1139,7 @@ async def show_today_orders(ctx) -> None:
         now = datetime.now(HK_TZ)
         yymmdd = now.strftime("%y%m%d")
         
-        output = order_service.format_orders_for_date(yymmdd)
+        output = order_service.format_orders_content(yymmdd)
         if not output:
             await send_reply(f"❌ No orders for today ({now.strftime('%Y-%m-%d')})")
             return
@@ -935,7 +1148,31 @@ async def show_today_orders(ctx) -> None:
         await send_reply("✅ Today's orders sent" if sent else "❌ #cake not found")
     except Exception as e:
         await send_reply(f"❌ Error: {str(e)[:100]}")
-        bot_stats.record_error("today_orders")
+
+# ========= NEW CAKE ORDER COMMAND =========
+@bot.tree.command(name="cake_order", description="🎂 Complete Smart Cake Order System - 21 Products!")
+async def cake_order(interaction: discord.Interaction):
+    """Complete smart order builder with all cake products"""
+    try:
+        view = OrderBuilderView(interaction.user.id)
+        
+        embed = discord.Embed(
+            title="🎂 Complete Smart Cake Order System",
+            description="**21 Products | 4 Sizes | Full Features**\n\n"
+                       "🍡 **Mini** ($22-$36) — 8 Petite Cakes\n"
+                       "🥐 **3\" French Pastry** ($52-$62) — 4 Cakes\n"
+                       "🎂 **6\" Whole Cake** ($388-$438) — 4 Cakes\n"
+                       "🍰 **8\" Whole Cake** ($588-$688) — 5 Cakes\n\n"
+                       "✨️ Limited editions available!\n\n"
+                       "**Select Size → Type → Product → Quantity → Checkout**",
+            color=discord.Color.gold()
+        )
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+        
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {str(e)[:100]}", ephemeral=True)
+        logger.error(f"Cake order error: {e}")
 
 # ========= BACKGROUND TASKS =========
 @tasks.loop(minutes=1)
@@ -947,7 +1184,11 @@ async def check_reminders() -> None:
             for r in user_rems[:]:
                 if now >= r["time"] and not r.get("sent", False):
                     try:
-                        target_user = await bot.fetch_user(TARGET_USER_ID)
+                        try:
+                            target_user = await bot.fetch_user(TARGET_USER_ID)
+                        except:
+                            target_user = None
+                        
                         if not target_user:
                             r["sent"] = True
                             continue
@@ -974,7 +1215,7 @@ async def check_reminders() -> None:
                             embed.add_field(name="Link", value=f"[View]({r['jump_url']})", inline=False)
 
                         mentions = target_user.mention
-                        if summary_only:
+                        if summary_only and TODAY_REMINDER_CHANNEL_ID > 0:
                             try:
                                 second_user = await bot.fetch_user(SECOND_USER_ID)
                                 if second_user:
@@ -982,62 +1223,30 @@ async def check_reminders() -> None:
                             except:
                                 pass
                             await send_today_reminder(embed, mentions)
-                        else:
+                        elif REMINDER_CHANNEL_ID > 0:
                             channel = bot.get_channel(REMINDER_CHANNEL_ID)
                             if channel:
                                 await channel.send(f"{mentions}", embed=embed)
 
                         r["sent"] = True
                         reminder_service.update_reminder_in_db(user_id, r)
-                        bot_stats.record_reminder()
                     except Exception as e:
                         logger.error(f"Reminder send error: {e}")
                         r["sent"] = True
-                        bot_stats.record_error("send_reminder")
     except Exception as e:
         logger.error(f"Check reminders error: {e}")
-        bot_stats.record_error("check_reminders")
-
-@tasks.loop(hours=1)
-async def cleanup_cache() -> None:
-    """Remove old data to prevent memory bloat."""
-    try:
-        now = datetime.now(HK_TZ)
-        
-        cutoff_reminders = now - timedelta(days=30)
-        for user_id, rems in list(reminders.items()):
-            reminders[user_id] = [r for r in rems if r["time"] > cutoff_reminders]
-            if not reminders[user_id]:
-                del reminders[user_id]
-        
-        logger.info("✅ Cache cleanup complete")
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}")
-
-@tasks.loop(hours=6)
-async def periodic_backup() -> None:
-    """Backup cache every 6 hours."""
-    try:
-        await data_persistence.backup_cache_to_db()
-    except Exception as e:
-        logger.error(f"Backup error: {e}")
-        bot_stats.record_error("backup")
-
-@tasks.loop(hours=1)
-async def periodic_health_check() -> None:
-    """Check system health hourly."""
-    try:
-        await ensure_mongodb_connected()
-        await data_persistence.verify_data_integrity()
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        bot_stats.record_error("health_check")
 
 # ========= STARTUP =========
 if __name__ == "__main__":
     logger.info("🚀 Starting bot...")
-    if init_mongodb():
-        keep_alive()
-        bot.run(BOT_TOKEN)
+    if MONGODB_URI:
+        init_mongodb()
     else:
-        logger.error("❌ Failed to initialize MongoDB, cannot start bot")
+        logger.warning("⚠️ MONGODB_URI not set - running without database")
+    
+    try:
+        keep_alive()
+    except:
+        pass
+    
+    bot.run(BOT_TOKEN)
