@@ -22,6 +22,9 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 HK_TZ = pytz.timezone("Asia/Hong_Kong")
 
+from cake_select_view import setup_cake_order_ui
+setup_cake_order_ui(bot)
+
 # ---------- MongoDB ----------
 try:
     mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
@@ -705,34 +708,6 @@ async def check_order_contents(ctx, date_arg: str):
 
     except Exception as e:
         await send_reply(f"❌ Failed to check orders: {e}")
-
-
-@bot.tree.command(
-    name="cake_order",
-    description="🎂 Interactive Cake Ordering System"
-)
-async def cake_order(interaction: discord.Interaction):
-    """Open cake ordering interface"""
-    try:
-        embed = discord.Embed(
-            title="🎂 Cake Order System",
-            description="Select Size → Type → Product → Add to Cart",
-            color=discord.Color.gold()
-        )
-        embed.add_field(name="Coming Soon", value="Interface will be added soon!")
-        
-        await interaction.response.send_message(
-            embed=embed,
-            ephemeral=False
-        )
-        
-    except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Error: {str(e)[:100]}",
-            ephemeral=True
-        )
-        print(f"Cake order error: {e}")
-
 
 # ---------- 定時檢查 ----------
 @tasks.loop(minutes=1)
