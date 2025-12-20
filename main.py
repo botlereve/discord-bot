@@ -208,7 +208,7 @@ def parse_order_content(text: str):
     content_part = text.split("訂單內容")[1]
 
     # --- FIX: Remove WhatsApp asterisks (*) immediately ---
-    content_part = content_part.replace("*", "")
+content_part = re.sub(r'\*([^*]+)\*', r'\1', content_part)
 
     # Stop at next section (Total, Date, Method)
     for keyword in ["總數", "取貨日期", "交收方式"]:
